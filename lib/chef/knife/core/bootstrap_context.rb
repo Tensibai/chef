@@ -84,6 +84,14 @@ class Chef
             "STDOUT"
           end
         end
+        def config_line_node_name
+          if @config[:chef_node_name]
+            %Q{node_name "#{@config[:chef_node_name]}"\n}
+          else
+            "# Using default node name (fqdn)\n"
+          end
+        end
+
 
         def config_content
           client_rb = <<~CONFIG
@@ -96,6 +104,8 @@ class Chef
           end
 
           client_rb << "log_location   #{get_log_location}\n"
+
+          client_rb << config_line_node_name
 
           if @config[:chef_node_name]
             client_rb << %Q{node_name "#{@config[:chef_node_name]}"\n}
@@ -161,7 +171,7 @@ class Chef
           end
 
           if Chef::Config[:fips]
-            client_rb << <<-CONFIG.gsub(/^ {14}/, "")
+            client_rb << <<~CONFIG
               fips true
               require "chef/version"
               chef_version = ::Chef::VERSION.split(".")

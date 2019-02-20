@@ -1,6 +1,6 @@
 #
 # Author:: Adam Jacob (<adam@chef.io>)
-# Copyright:: Copyright 2010-2016, Chef Software Inc.
+# Copyright:: Copyright 2010-2019, Chef Software Inc.
 # License:: Apache License, Version 2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,232 +22,34 @@ require "erubis"
 require "chef/knife/bootstrap/chef_vault_handler"
 require "chef/knife/bootstrap/client_builder"
 require "chef/util/path_helper"
+require "chef/knife/bootstrap/options"
 
 class Chef
   class Knife
     class Bootstrap < Knife
       include DataBagSecretOptions
 
+      # Command line flags and options for bootstrap - there's a large number of them
+      # so we'll keep this file a little smaller by splitting them out.
+      include Bootstrap::Options
+
       attr_accessor :client_builder
       attr_accessor :chef_vault_handler
+      attr_reader   :target_host
 
       deps do
-        require "chef/knife/core/bootstrap_context"
         require "chef/json_compat"
         require "tempfile"
-        require "highline"
-        require "net/ssh"
-        require "net/ssh/multi"
-        require "chef/knife/ssh"
-        Chef::Knife::Ssh.load_deps
+        require "chef_core/text" # i18n and standardized error structures
+        require "chef_core/target_host"
+        require "chef_core/target_resolver"
       end
 
-      banner "knife bootstrap [SSH_USER@]FQDN (options)"
-
-      option :ssh_user,
-        short: "-x USERNAME",
-        long: "--ssh-user USERNAME",
-        description: "The ssh username",
-        default: "root"
-
-      option :ssh_password,
-        short: "-P PASSWORD",
-        long: "--ssh-password PASSWORD",
-        description: "The ssh password"
-
-      option :ssh_port,
-        short: "-p PORT",
-        long: "--ssh-port PORT",
-        description: "The ssh port",
-        proc: Proc.new { |key| Chef::Config[:knife][:ssh_port] = key }
-
-      option :ssh_gateway,
-        short: "-G GATEWAY",
-        long: "--ssh-gateway GATEWAY",
-        description: "The ssh gateway",
-        proc: Proc.new { |key| Chef::Config[:knife][:ssh_gateway] = key }
-
-      option :ssh_gateway_identity,
-        long: "--ssh-gateway-identity SSH_GATEWAY_IDENTITY",
-        description: "The SSH identity file used for gateway authentication",
-        proc: Proc.new { |key| Chef::Config[:knife][:ssh_gateway_identity] = key }
-
-      option :forward_agent,
-        short: "-A",
-        long: "--forward-agent",
-        description: "Enable SSH agent forwarding",
-        boolean: true
-
-      option :ssh_identity_file,
-        short: "-i IDENTITY_FILE",
-        long: "--ssh-identity-file IDENTITY_FILE",
-        description: "The SSH identity file used for authentication"
-
-      option :chef_node_name,
-        short: "-N NAME",
-        long: "--node-name NAME",
-        description: "The Chef node name for your new node"
-
-      option :prerelease,
-        long: "--prerelease",
-        description: "Install the pre-release chef gems"
-
-      option :bootstrap_version,
-        long: "--bootstrap-version VERSION",
-        description: "The version of Chef to install",
-        proc: lambda { |v| Chef::Config[:knife][:bootstrap_version] = v }
-
-      option :bootstrap_proxy,
-        long: "--bootstrap-proxy PROXY_URL",
-        description: "The proxy server for the node being bootstrapped",
-        proc: Proc.new { |p| Chef::Config[:knife][:bootstrap_proxy] = p }
-
-      option :bootstrap_proxy_user,
-        long: "--bootstrap-proxy-user PROXY_USER",
-        description: "The proxy authentication username for the node being bootstrapped"
-
-      option :bootstrap_proxy_pass,
-        long: "--bootstrap-proxy-pass PROXY_PASS",
-        description: "The proxy authentication password for the node being bootstrapped"
-
-      option :bootstrap_no_proxy,
-        long: "--bootstrap-no-proxy [NO_PROXY_URL|NO_PROXY_IP]",
-        description: "Do not proxy locations for the node being bootstrapped; this option is used internally by Opscode",
-        proc: Proc.new { |np| Chef::Config[:knife][:bootstrap_no_proxy] = np }
-
-      option :bootstrap_template,
-        short: "-t TEMPLATE",
-        long: "--bootstrap-template TEMPLATE",
-        description: "Bootstrap Chef using a built-in or custom template. Set to the full path of an erb template or use one of the built-in templates."
-
-      option :use_sudo,
-        long: "--sudo",
-        description: "Execute the bootstrap via sudo",
-        boolean: true
-
-      option :preserve_home,
-        long: "--sudo-preserve-home",
-        description: "Preserve non-root user HOME environment variable with sudo",
-        boolean: true
-
-      option :use_sudo_password,
-        long: "--use-sudo-password",
-        description: "Execute the bootstrap via sudo with password",
-        boolean: false
-
-      option :run_list,
-        short: "-r RUN_LIST",
-        long: "--run-list RUN_LIST",
-        description: "Comma separated list of roles/recipes to apply",
-        proc: lambda { |o| o.split(/[\s,]+/) },
-        default: []
-
-      option :policy_name,
-        long: "--policy-name POLICY_NAME",
-        description: "Policyfile name to use (--policy-group must also be given)",
-        default: nil
-
-      option :policy_group,
-        long: "--policy-group POLICY_GROUP",
-        description: "Policy group name to use (--policy-name must also be given)",
-        default: nil
-
-      option :tags,
-        long: "--tags TAGS",
-        description: "Comma separated list of tags to apply to the node",
-        proc: lambda { |o| o.split(/[\s,]+/) },
-        default: []
-
-      option :first_boot_attributes,
-        short: "-j JSON_ATTRIBS",
-        long: "--json-attributes",
-        description: "A JSON string to be added to the first run of chef-client",
-        proc: lambda { |o| Chef::JSONCompat.parse(o) },
-        default: nil
-
-      option :first_boot_attributes_from_file,
-        long: "--json-attribute-file FILE",
-        description: "A JSON file to be used to the first run of chef-client",
-        proc: lambda { |o| Chef::JSONCompat.parse(File.read(o)) },
-        default: nil
-
-      option :host_key_verify,
-        long: "--[no-]host-key-verify",
-        description: "Verify host key, enabled by default.",
-        boolean: true,
-        default: true
-
-      option :hint,
-        long: "--hint HINT_NAME[=HINT_FILE]",
-        description: "Specify Ohai Hint to be set on the bootstrap target. Use multiple --hint options to specify multiple hints.",
-        proc: Proc.new { |h|
-          Chef::Config[:knife][:hints] ||= Hash.new
-          name, path = h.split("=")
-          Chef::Config[:knife][:hints][name] = path ? Chef::JSONCompat.parse(::File.read(path)) : Hash.new
-        }
-
-      option :bootstrap_url,
-        long: "--bootstrap-url URL",
-        description: "URL to a custom installation script",
-        proc: Proc.new { |u| Chef::Config[:knife][:bootstrap_url] = u }
-
-      option :bootstrap_install_command,
-        long: "--bootstrap-install-command COMMANDS",
-        description: "Custom command to install chef-client",
-        proc: Proc.new { |ic| Chef::Config[:knife][:bootstrap_install_command] = ic }
-
-      option :bootstrap_preinstall_command,
-             long: "--bootstrap-preinstall-command COMMANDS",
-             description: "Custom commands to run before installing chef-client",
-             proc: Proc.new { |preic| Chef::Config[:knife][:bootstrap_preinstall_command] = preic }
-
-      option :bootstrap_wget_options,
-        long: "--bootstrap-wget-options OPTIONS",
-        description: "Add options to wget when installing chef-client",
-        proc: Proc.new { |wo| Chef::Config[:knife][:bootstrap_wget_options] = wo }
-
-      option :bootstrap_curl_options,
-        long: "--bootstrap-curl-options OPTIONS",
-        description: "Add options to curl when install chef-client",
-        proc: Proc.new { |co| Chef::Config[:knife][:bootstrap_curl_options] = co }
-
-      option :node_ssl_verify_mode,
-        long: "--node-ssl-verify-mode [peer|none]",
-        description: "Whether or not to verify the SSL cert for all HTTPS requests.",
-        proc: Proc.new { |v|
-          valid_values = %w{none peer}
-          unless valid_values.include?(v)
-            raise "Invalid value '#{v}' for --node-ssl-verify-mode. Valid values are: #{valid_values.join(", ")}"
-          end
-          v
-        }
-
-      option :node_verify_api_cert,
-        long: "--[no-]node-verify-api-cert",
-        description: "Verify the SSL cert for HTTPS requests to the Chef server API.",
-        boolean: true
-
-      option :bootstrap_vault_file,
-        long: "--bootstrap-vault-file VAULT_FILE",
-        description: "A JSON file with a list of vault(s) and item(s) to be updated"
-
-      option :bootstrap_vault_json,
-        long: "--bootstrap-vault-json VAULT_JSON",
-        description: "A JSON string with the vault(s) and item(s) to be updated"
-
-      option :bootstrap_vault_item,
-        long: "--bootstrap-vault-item VAULT_ITEM",
-        description: 'A single vault and item to update as "vault:item"',
-        proc: Proc.new { |i|
-          (vault, item) = i.split(/:/)
-          Chef::Config[:knife][:bootstrap_vault_item] ||= {}
-          Chef::Config[:knife][:bootstrap_vault_item][vault] ||= []
-          Chef::Config[:knife][:bootstrap_vault_item][vault].push(item)
-          Chef::Config[:knife][:bootstrap_vault_item]
-        }
+      banner "knife bootstrap [PROTOCOL://][USER@]FQDN (options)"
 
       def initialize(argv = [])
         super
+        # TODO - these map cleanly to action support classes
         @client_builder = Chef::Knife::Bootstrap::ClientBuilder.new(
           chef_config: Chef::Config,
           knife_config: config,
@@ -259,12 +61,16 @@ class Chef
         )
       end
 
-      # The default bootstrap template to use to bootstrap a server This is a public API hook
-      # which knife plugins use or inherit and override.
+      # The default bootstrap template to use to bootstrap a server.
+      # This is a public API hook which knife plugins use or inherit and override.
       #
       # @return [String] Default bootstrap template
       def default_bootstrap_template
-        "chef-full"
+        if target_host.base_os == :windows
+          "windows-chef-client-msi"
+        else
+          "chef-full"
+        end
       end
 
       def host_descriptor
@@ -282,15 +88,10 @@ class Chef
         end
       end
 
-      def user_name
-        if host_descriptor
-          @user_name ||= host_descriptor.split("@").reverse[1]
-        end
-      end
 
+      # @return [String] The CLI specific bootstrap template or the default
       def bootstrap_template
         # Allow passing a bootstrap template or use the default
-        # @return [String] The CLI specific bootstrap template or the default
         config[:bootstrap_template] || default_bootstrap_template
       end
 
@@ -331,12 +132,17 @@ class Chef
       end
 
       def bootstrap_context
-        @bootstrap_context ||= Knife::Core::BootstrapContext.new(
-          config,
-          config[:run_list],
-          Chef::Config,
-          secret
-        )
+        @bootstrap_context ||=
+          if target_host.base_os == :windows
+
+            require "chef/knife/core/windows_bootstrap_context"
+            Knife::Core::WindowsBootstrapContext.new(config, config[:run_list],
+                                                     Chef::Config, secret)
+          else
+            require "chef/knife/core/bootstrap_context"
+            Knife::Core::BootstrapContext.new(config, config[:run_list],
+                                              Chef::Config, secret)
+          end
       end
 
       def first_boot_attributes
@@ -360,6 +166,8 @@ class Chef
 
         $stdout.sync = true
 
+        bootstrap_path = nil
+
         # chef-vault integration must use the new client-side hawtness, otherwise to use the
         # new client-side hawtness, just delete your validation key.
         if chef_vault_handler.doing_chef_vault? ||
@@ -374,25 +182,76 @@ class Chef
 
           chef_vault_handler.run(client_builder.client)
 
-          bootstrap_context.client_pem = client_builder.client_path
         else
           ui.info("Doing old-style registration with the validation key at #{Chef::Config[:validation_key]}...")
           ui.info("Delete your validation key in order to use your user credentials instead")
           ui.info("")
         end
 
-        ui.info("Connecting to #{ui.color(server_name, :bold)}")
+        connect!
 
-        begin
-          knife_ssh.run
-        rescue Net::SSH::AuthenticationFailed
-          if config[:ssh_password]
+        # Now that we have a connected target_host, we can use (by referencing it...)
+        # "bootstrap_context".
+        unless client_builder.client_path.nil?
+          bootstrap_context.client_pem = client_builder.client_path
+        end
+
+        bootstrap_path = render_and_upload_bootstrap
+        ui.info("Bootstrapping #{ui.color(server_name, :bold)}")
+        r = target_host.run_command(bootstrap_command(bootstrap_path)) do |data|
+          ui.msg("#{ui.color(" [#{target_host.hostname}]", :cyan)} #{data}")
+        end
+        if r.exit_status != 0
+          ui.error("The following error occurred on #{server_name}:")
+          ui.error(r.stderr)
+          exit 1
+        end
+      ensure
+        target_host.del_file(bootstrap_path) if target_host && bootstrap_path
+      end
+
+      def connect!
+        ui.info("Connecting to #{ui.color(server_name, :bold)}")
+        opts = connection_opts.dup
+        do_connect(opts) # rescue: TargetResolverError
+      rescue => e
+        # Ugh. TODO 1: Train raises a Train::Transports::SSHFailed for a number of different errors. chef_core makes that
+        # a more general ConnectionFailed, with an error code based on the specific error text/reason provided from trainm.
+        # This means we have to look three layers intot he exception to find out what actually happened instead of just
+        # looking at the exception type
+        #
+        # It doesn't help to provide our own error if it does't let the caller know what they need to identify the problem.
+        # Let's update chef_core to be a bit smarter about resolving the errors to an appropriate exception type
+        # (eg ChefCore::ConnectionFailed::AuthError or similar) that will work across protocols, instead of just a single
+        # ConnectionFailure type
+        #
+        # # TODO 2 - it is possible for train to automatically do the reprompt for password
+        #            but that will take a little digging through the train ssh protocol layer.
+        if e.cause && e.cause.cause && e.cause.cause.class == Net::SSH::AuthenticationFailed
+          if opts[:password]
             raise
           else
-            ui.info("Failed to authenticate #{knife_ssh.config[:ssh_user]} - trying password auth")
-            knife_ssh_with_password_auth.run
+            ui.warn("Failed to authenticate #{target_host.user} - trying password auth")
+            password = ui.ask("Enter password for #{target_host.user}@#{target_host.hostname}: ") do |q|
+              q.echo = false
+            end
+            update_connection_opts_for_forced_password(opts, password)
+            do_connect(opts)
           end
+        else
+          raise
         end
+      end
+
+      def do_connect(conn_options)
+        # Resolve the given host name to a TargetHost instance. We will limit
+        # the number of hosts to 1 (effectivly eliminating wildcard support) since
+        # we only support running bootstrap against one host at a time.
+        resolver = ChefCore::TargetResolver.new(host_descriptor, config[:protocol] || "ssh",
+                                                conn_options, max_expanded_targets: 1)
+        @target_host = resolver.targets.first
+        @target_host.connect!
+        @target_host
       end
 
       # fail if the server_name is nil
@@ -400,9 +259,6 @@ class Chef
         if server_name.nil?
           ui.error("Must pass an FQDN or ip to bootstrap")
           exit 1
-        elsif server_name == "windows"
-          # catches "knife bootstrap windows" when that command is not installed
-          ui.warn("'knife bootstrap windows' specified, but the knife-windows plugin is not installed. Please install 'knife-windows' if you are attempting to bootstrap a Windows node via WinRM.")
         end
       end
 
@@ -424,48 +280,104 @@ class Chef
         true
       end
 
-      # setup a Chef::Knife::Ssh object using the passed config options
+      # Createa configuration object based on setup a Chef::Knife::Ssh object using the passed config options
+      # Includes connection information for both supported protocols at this time - unused config is ignored.
       #
-      # @return Chef::Knife::Ssh
-      def knife_ssh
-        ssh = Chef::Knife::Ssh.new
-        ssh.ui = ui
-        ssh.name_args = [ server_name, ssh_command ]
-        ssh.config[:ssh_user] = user_name || config[:ssh_user]
-        ssh.config[:ssh_password] = config[:ssh_password]
-        ssh.config[:ssh_port] = config[:ssh_port]
-        ssh.config[:ssh_gateway] = config[:ssh_gateway]
-        ssh.config[:ssh_gateway_identity] = config[:ssh_gateway_identity]
-        ssh.config[:forward_agent] = config[:forward_agent]
-        ssh.config[:ssh_identity_file] = config[:ssh_identity_file]
-        ssh.config[:manual] = true
-        ssh.config[:host_key_verify] = config[:host_key_verify]
-        ssh.config[:on_error] = true
-        ssh
-      end
+      # @return a configuration hash suitable for connecting to the remote host via TargetHost.
+      def connection_opts
+        # Mapping of our options to TargetHost/train options - they're pretty similar with removal of
+        # the ssh- prefix, but there's more to correct
+        opts = {
+          port: config[:port], # Default if it's not in the connection string
+          user: config[:user], #  "
+          password: config[:password], # TODO - check if we need to exclude if not set, diff behavior for nil?
+          forward_agent: config[:forward_agent] || false ,
+          logger:  Chef::Log,
+          key_files: [],
+          # WinRM options - they will be ignored for ssh
+          # TODO train will throw if this is not valid, should be OK as-is
+          winrm_transport: config[:winrm_transport],
+          self_signed: config[:winrm_no_verify_cert] === true,
+          winrm_basic_auth_only: config[:winrm_basic_auth_only],
+          ssl: config[:winrm_ssl],
+          ssl_peer_fingerprint: config[:winrm_ssl_peer_fingerprint]
 
-      # prompt for a password then return a knife ssh object with that password set
-      # and with ssh_identity_file set to nil
-      #
-      # @return Chef::Knife::Ssh
-      def knife_ssh_with_password_auth
-        ssh = knife_ssh
-        ssh.config[:ssh_identity_file] = nil
-        ssh.config[:ssh_password] = ssh.get_password
-        ssh
-      end
+          # NOTE: 'ssl' true is different from using the ssl auth protocol which supoorts
+          #       using client cert+key (though we dongtgt
+        }
 
-      # build the ssh dommand for bootrapping
-      # @return String
-      def ssh_command
-        command = render_template
-
-        if config[:use_sudo]
-          sudo_prefix = config[:use_sudo_password] ? "echo '#{config[:ssh_password]}' | sudo -S " : "sudo "
-          command = config[:preserve_home] ? "#{sudo_prefix} #{command}" : "#{sudo_prefix} -H #{command}"
+        if opts[:ssh_identity_file]
+          opts[:keys_only] = true
+          opts[:key_files] << config[:ssh_identity_file]
         end
 
-        command
+        if config[:ssh_gateway]
+          gw_host, gw_user = config[:ssh_gateway].split("@").reverse
+          gw_host, gw_port = gw_host.split(":")
+          opts[:bastion_host] = gw_host
+          opts[:bastion_port] = gw_port
+          opts[:bastion_user] = gw_user
+          if config[:ssh_gatway_identity]
+            opts[:key_files] << config[:ssh_gateway_identity]
+          end
+        end
+
+        if config[:use_sudo]
+          opts[:sudo] = true
+          if opts[:use_sudo_password]
+            opts[:sudo_password] = config[:password]
+          end
+          if opts[:preserve_home]
+             opts[:sudo_options] = "-H"
+          end
+        end
+
+        # REVIEWERS - maybe we combine this and winrm_no_verify_cert flags into "--no-verify-target"?
+        opts[:host_key_verify] = config[:host_key_verify].nil? ? true : config[:host_key_verify]
+
+        if config[:password]
+          opts[:password] = config[:password]
+        end
+
+
+        opts[:winrm_transport] = config[:winrm_auth_method]
+        if config[:winrm_auth_method] == "kerberos"
+          opts[:kerberos_service] = config[:kerberos_service]
+          opts[:kerberos_realm] = config[:kerberos_realm]
+        end
+
+        opts[:ca_trust_path] = config[:ca_trust_path]
+
+        opts[:winrm_basic_auth_only] = config[:winrm_basic_auth_only] if config[:winrm_basic_auth_only]
+        opts
+      end
+
+
+      def update_connection_opts_for_forced_password(opts, password)
+        opts[:password] = password
+        opts[:non_interactive] = false
+        opts[:keys_only] = false
+        opts[:key_files] = nil
+        opts[:auth_methods] = [:password, :keyboard_interactive]
+      end
+
+      def render_and_upload_bootstrap
+        content = render_template
+        script_name = target_host.base_os == :windows ? "bootstrap.bat" : "bootstrap.sh"
+        remote_path = target_host.normalize_path(File.join(target_host.temp_dir, script_name))
+        target_host.save_as_remote_file(content, remote_path)
+        remote_path
+      end
+
+
+      # build the command string for bootrapping
+      # @return String
+      def bootstrap_command(remote_path)
+        if target_host.base_os == :windows
+          "cmd.exe /C #{remote_path}"
+        else
+          "sh #{remote_path} "
+        end
       end
 
       private
