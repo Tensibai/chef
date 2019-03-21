@@ -315,6 +315,17 @@ class Chef
         raise ArgumentError, "Property #{name} is not defined in class #{self}" if !property
         property.description
       end
+
+      def copy_properties_from(other, *includes, exclude: [])
+        includes = other.class.properties.keys if includes.empty?
+        includes.each do |p|
+          if self.class.properties.include?(p) && other.property_is_set?(p)
+            send(p, other.send(p))
+          end
+        end
+        self
+      end
+
     end
   end
 end

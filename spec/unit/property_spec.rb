@@ -1228,4 +1228,45 @@ describe "Chef::Resource.property" do
       end
     end
   end
+
+  context "#copy_properties_from" do
+    let(:events) { Chef::EventDispatch::Dispatcher.new }
+    let(:node) { Chef::Node.new }
+    let(:run_context) { Chef::RunContext.new(node, {}, events) }
+
+    Class.new(Chef::Resource) do
+      resource_name :wrapped_foo_thingy
+      provides :wrapped_foo_thingy
+      property :foo, String
+      action :doit do
+        new_resource.foo
+      end
+    end
+
+    let(:wrapping_class) do
+      Class.new(Chef::Resource) do
+        resource_name :wrapping_foo_thingy
+        provides :wrapping_foo_thingy
+        property :foo, String
+        property :out, String
+
+        action :doit do
+          r = wrapped_foo_thingy "whatever" do
+            copy_properties_from new_resource
+          end
+          new_resource.out = r.foo
+        end
+      end
+    end
+
+    let(:wrapping_resource) do
+      wrapping_class.new("name", run_context)
+    end
+
+    it "works" do
+      wrapping_resource.foo "bar"
+      wrapping_resource.run_action(:doit)
+      expect(wrapping_resource.out).to eql("bar")
+    end
+  end
 end
