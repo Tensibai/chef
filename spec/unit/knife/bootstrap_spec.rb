@@ -22,33 +22,36 @@ Chef::Knife::Bootstrap.load_deps
 require "net/ssh"
 
 describe Chef::Knife::Bootstrap do
-  before do
-    allow(ChefConfig).to receive(:windows?) { false }
-  end
+  let(:bootstrap_template) { nil }
+  let(:stderr) { StringIO.new }
+  let(:bootstrap_cli_options) { [ ] }
+  let(:base_os) { :linux }
+  let(:target_host) { double("TargetHost") }
+
   let(:knife) do
     Chef::Log.logger = Logger.new(StringIO.new)
     Chef::Config[:knife][:bootstrap_template] = bootstrap_template unless bootstrap_template.nil?
 
     k = Chef::Knife::Bootstrap.new(bootstrap_cli_options)
-    k.merge_configs
-
     allow(k.ui).to receive(:stderr).and_return(stderr)
     allow(k).to receive(:encryption_secret_provided_ignore_encrypt_flag?).and_return(false)
+    allow(k).to receive(:target_host).and_return target_host
+    k.merge_configs
     k
   end
 
-  let(:stderr) { StringIO.new }
-
-  let(:bootstrap_template) { nil }
-
-  let(:bootstrap_cli_options) { [ ] }
-
-  it "should use chef-full as default template" do
-    expect(knife.bootstrap_template).to be_a_kind_of(String)
-    expect(File.basename(knife.bootstrap_template)).to eq("chef-full")
+  before do
+    allow(target_host).to receive(:base_os).and_return base_os
   end
 
-  context "when using the chef-full default template" do
+  context "#bootstrap_template" do
+    it "should default to chef-full" do
+      expect(knife.bootstrap_template).to be_a_kind_of(String)
+      expect(File.basename(knife.bootstrap_template)).to eq("chef-full")
+    end
+  end
+
+  context "#render_template - when using the chef-full default template" do
     let(:rendered_template) do
       knife.merge_configs
       knife.render_template
@@ -284,14 +287,14 @@ describe Chef::Knife::Bootstrap do
         jsonfile.close
       end
 
-      context "when --json-attributes and --json-attribute-file were both passed" do
-        it "raises a Chef::Exceptions::BootstrapCommandInputError with the proper error message" do
-          knife.parse_options(["-j", '{"foo":{"bar":"baz"}}'])
-          knife.parse_options(["--json-attribute-file", jsonfile.path])
-          knife.merge_configs
-          expect { knife.run }.to raise_error(Chef::Exceptions::BootstrapCommandInputError)
-          jsonfile.close
-        end
+      it "raises a Chef::Exceptions::BootstrapCommandInputError with the proper error message" do
+        knife.parse_options(["-j", '{"foo":{"bar":"baz"}}'])
+        knife.parse_options(["--json-attribute-file", jsonfile.path])
+        knife.merge_configs
+        allow(knife).to receive(:validate_name_args!)
+
+        expect { knife.run }.to raise_error(Chef::Exceptions::BootstrapCommandInputError)
+        jsonfile.close
       end
     end
   end
@@ -317,13 +320,16 @@ describe Chef::Knife::Bootstrap do
     subject(:knife) do
       k = described_class.new
       Chef::Config[:knife][:bootstrap_template] = template_file
+      allow(k).to receive(:target_host).and_return target_host
       k.parse_options(options)
       k.merge_configs
       k
     end
 
     let(:options) { ["--bootstrap-no-proxy", setting, "-s", "foo"] }
+
     let(:template_file) { File.expand_path(File.join(CHEF_SPEC_DATA, "bootstrap", "no_proxy.erb")) }
+
     let(:rendered_template) do
       knife.render_template
     end
@@ -540,14 +546,119 @@ describe Chef::Knife::Bootstrap do
     end
   end
 
-  describe "handling policyfile options" do
+
+
+  describe "#connection_protocol" do
+    let(:host_descriptor) { "example.com" }
+    let(:config) { { } }
+    let(:knife_bootstrap_protocol) { nil }
+    before do
+      allow(knife).to receive(:config).and_return config
+      allow(knife).to receive(:host_descriptor).and_return host_descriptor
+      if knife_bootstrap_protocol
+        Chef::Config[:knife][:bootstrap_protocol] = knife_bootstrap_protocol
+      end
+    end
+
+    context "when protocol is part of the host argument" do
+      let(:host_descriptor) { "winrm://myhost" }
+
+      it "returns the value provided by the host argument" do
+        expect(knife.connection_protocol).to eq "winrm"
+      end
+    end
+
+    context "when protocol is provided via the CLI flag" do
+      let(:config) { { protocol: "winrm" } }
+      it "returns that value" do
+        expect(knife.connection_protocol).to eq "winrm"
+      end
+
+
+    end
+    context "when protocol is provided via the host argument and the CLI flag"  do
+      let(:host_descriptor) { "ssh://example.com" }
+      let(:config) { { protocol: "winrm" } }
+
+      it "returns the value provided by the host argument" do
+        expect(knife.connection_protocol).to eq "ssh"
+      end
+    end
+
+    context "when no explicit protocol is provided" do
+      let(:config) { {} }
+      let(:host_descriptor) { "example.com" }
+      let(:knife_bootstrap_protocol) { "winrm" }
+      it "falls back to knife config" do
+        expect(knife.connection_protocol).to eq "winrm"
+      end
+      context "and there is no knife bootstrap_protocol" do
+        let(:knife_bootstrap_protocol) { nil }
+        it "falls back to 'ssh'" do
+          expect(knife.connection_protocol).to eq "ssh"
+        end
+      end
+    end
+
+  end
+
+  describe "#validate_protocol!" do
+    let(:host_descriptor) { "example.com" }
+    let(:config) { { } }
+    let(:connection_protocol) { "ssh" }
+    before do
+      allow(knife).to receive(:config).and_return config
+      allow(knife).to receive(:connection_protocol).and_return connection_protocol
+      allow(knife).to receive(:host_descriptor).and_return host_descriptor
+    end
+
+    context "when protocol is provided both in the URL and via --protocol" do
+
+      context "and they do not match" do
+        let(:connection_protocol) { "ssh" }
+        let(:config) { { protocol: "winrm" } }
+        it "outputs an error and exits" do
+          expect(knife.ui).to receive(:error)
+          expect{ knife.validate_protocol! }.to raise_error SystemExit
+        end
+      end
+
+      context "and they do match" do
+        let(:connection_protocol) { "winrm" }
+        let(:config) { { protocol: "winrm" } }
+        it "returns true" do
+          expect(knife.validate_protocol!).to eq true
+        end
+      end
+    end
+
+    context "and the protocol is supported" do
+
+      Chef::Knife::Bootstrap::SUPPORTED_CONNECTION_PROTOCOLS.each do |proto|
+        let(:connection_protocol) { proto }
+        it "returns true for #{proto}" do
+          expect(knife.validate_protocol!).to eq true
+        end
+      end
+    end
+
+    context "and the protocol is not supported" do
+      let(:connection_protocol) { "invalid" }
+      it "outputs an error and exits" do
+        expect(knife.ui).to receive(:error).with(/Unsupported protocol '#{connection_protocol}'/)
+        expect{ knife.validate_protocol! }.to raise_error SystemExit
+      end
+    end
+  end
+
+  describe "#validate_policy_options!" do
 
     context "when only policy_name is given" do
 
       let(:bootstrap_cli_options) { %w{ --policy-name my-app-server } }
 
       it "returns an error stating that policy_name and policy_group must be given together" do
-        expect { knife.validate_options! }.to raise_error(SystemExit)
+        expect { knife.validate_policy_options! }.to raise_error(SystemExit)
         expect(stderr.string).to include("ERROR: --policy-name and --policy-group must be specified together")
       end
 
@@ -558,7 +669,7 @@ describe Chef::Knife::Bootstrap do
       let(:bootstrap_cli_options) { %w{ --policy-group staging } }
 
       it "returns an error stating that policy_name and policy_group must be given together" do
-        expect { knife.validate_options! }.to raise_error(SystemExit)
+        expect { knife.validate_policy_options! }.to raise_error(SystemExit)
         expect(stderr.string).to include("ERROR: --policy-name and --policy-group must be specified together")
       end
 
@@ -569,7 +680,7 @@ describe Chef::Knife::Bootstrap do
       let(:bootstrap_cli_options) { %w{ --policy-name my-app --policy-group staging --run-list cookbook } }
 
       it "returns an error stating that policyfile and run_list are exclusive" do
-        expect { knife.validate_options! }.to raise_error(SystemExit)
+        expect { knife.validate_policy_options! }.to raise_error(SystemExit)
         expect(stderr.string).to include("ERROR: Policyfile options and --run-list are exclusive")
       end
 
@@ -580,7 +691,7 @@ describe Chef::Knife::Bootstrap do
       let(:bootstrap_cli_options) { %w{ --policy-name my-app --policy-group staging } }
 
       it "passes options validation" do
-        expect { knife.validate_options! }.to_not raise_error
+        expect { knife.validate_policy_options! }.to_not raise_error
       end
 
       it "passes them into the bootstrap context" do
@@ -598,63 +709,20 @@ describe Chef::Knife::Bootstrap do
     # Arguably a bug in the plugin: it shouldn't be setting this to nil, but it
     # worked before, so make it work now.
     context "when a plugin sets the run list option to nil" do
-
       before do
         knife.config[:run_list] = nil
       end
 
       it "passes options validation" do
-        expect { knife.validate_options! }.to_not raise_error
+        expect { knife.validate_policy_options! }.to_not raise_error
       end
-
     end
-
   end
 
-  describe "when configuring the underlying knife ssh command" do
-    context "from the command line" do
-      let(:knife_ssh) do
-        knife.name_args = ["foo.example.com"]
-        knife.config[:ssh_user]      = "rooty"
-        knife.config[:ssh_port]      = "4001"
-        knife.config[:ssh_password]  = "open_sesame"
-        Chef::Config[:knife][:ssh_user] = nil
-        Chef::Config[:knife][:ssh_port] = nil
-        knife.config[:forward_agent] = true
-        knife.config[:ssh_identity_file] = "~/.ssh/me.rsa"
-        allow(knife).to receive(:render_template).and_return("")
-        knife.knife_ssh
-      end
-
-      it "configures the hostname" do
-        expect(knife_ssh.name_args.first).to eq("foo.example.com")
-      end
-
-      it "configures the ssh user" do
-        expect(knife_ssh.config[:ssh_user]).to eq("rooty")
-      end
-
-      it "configures the ssh password" do
-        expect(knife_ssh.config[:ssh_password]).to eq("open_sesame")
-      end
-
-      it "configures the ssh port" do
-        expect(knife_ssh.config[:ssh_port]).to eq("4001")
-      end
-
-      it "configures the ssh agent forwarding" do
-        expect(knife_ssh.config[:forward_agent]).to eq(true)
-      end
-
-      it "configures the ssh identity file" do
-        expect(knife_ssh.config[:ssh_identity_file]).to eq("~/.ssh/me.rsa")
-      end
-    end
-
+  describe "#connection_opts [to create connection configuration]" do
     context "validating use_sudo_password" do
       before do
         knife.config[:ssh_password] = "password"
-        allow(knife).to receive(:render_template).and_return("")
       end
 
       it "use_sudo_password contains description and long params for help" do
@@ -662,86 +730,630 @@ describe Chef::Knife::Bootstrap do
           && expect(knife.options[:use_sudo_password][:description].to_s).not_to(eq(""))\
           && expect(knife.options[:use_sudo_password][:long].to_s).not_to(eq(""))
       end
+    end
 
-      it "uses the password from --ssh-password for sudo when --use-sudo-password is set" do
-        knife.config[:use_sudo] = true
-        knife.config[:use_sudo_password] = true
-        expect(knife.ssh_command).to include("echo \'#{knife.config[:ssh_password]}\' | sudo -S")
-      end
+  end
 
-      it "should not honor --use-sudo-password when --use-sudo is not set" do
-        knife.config[:use_sudo] = false
-        knife.config[:use_sudo_password] = true
-        expect(knife.ssh_command).not_to include("echo #{knife.config[:ssh_password]} | sudo -S")
+  context "#connection_opts" do
+    before :each do
+      # TODO UNTESTED:
+      # Chef::Config[:knife][:ssh_forward_agent] = true
+      # Chef::Config[:knife][:max_wait_seconds_until_ready] = 100
+
+
+    end
+
+    let(:expected_connection_opts) {
+      { base_opts: true,
+        ssh_identity_opts: true,
+        gateway_opts: true,
+        host_verify_opts: true,
+        sudo_opts: true,
+        winrm_opts: true }
+    }
+
+    it "merges expected configurations" do
+      expect(knife).to receive(:base_opts).and_return({ base_opts: true })
+      expect(knife).to receive(:host_verify_opts).and_return({ host_verify_opts: true })
+      expect(knife).to receive(:gateway_opts).and_return({ gateway_opts: true })
+      expect(knife).to receive(:sudo_opts).and_return({ sudo_opts: true })
+      expect(knife).to receive(:winrm_opts).and_return({ winrm_opts: true })
+      expect(knife).to receive(:ssh_identity_opts).and_return({ ssh_identity_opts: true })
+      expect(knife.connection_opts).to match expected_connection_opts
+    end
+  end
+
+  context "#base_opts" do
+    let(:connection_protocol) { nil }
+
+    before do
+      allow(knife).to receive(:connection_protocol).and_return connection_protocol
+    end
+
+    context "when determining knife config keys for user and port" do
+      let(:connection_protocol) { "fake" }
+      it "uses the protocol name to resolve the knife config keys" do
+        expect(knife).to receive(:config_value).with(:user, :fake_user)
+        expect(knife).to receive(:config_value).with(:port, :fake_port)
+        knife.base_opts
       end
     end
 
-    context "from the knife config file" do
-      let(:knife_ssh) do
-        knife.name_args = ["config.example.com"]
-        Chef::Config[:knife][:ssh_user] = "curiosity"
-        Chef::Config[:knife][:ssh_port] = "2430"
-        Chef::Config[:knife][:forward_agent] = true
-        Chef::Config[:knife][:ssh_identity_file] = "~/.ssh/you.rsa"
-        Chef::Config[:knife][:ssh_gateway] = "towel.blinkenlights.nl"
-        Chef::Config[:knife][:ssh_gateway_identity] = "~/.ssh/gateway.rsa"
-        Chef::Config[:knife][:host_key_verify] = true
-        allow(knife).to receive(:render_template).and_return("")
-        knife.config = {}
-        knife.merge_configs
-        knife.knife_ssh
-      end
 
-      it "configures the ssh user" do
-        expect(knife_ssh.config[:ssh_user]).to eq("curiosity")
-      end
+    context "for all protocols" do
+      context "when password is provided" do
+        before do
+          knife.config[:port] = 250
+          knife.config[:user] = "test"
+          knife.config[:password] = "opscode"
+        end
 
-      it "configures the ssh port" do
-        expect(knife_ssh.config[:ssh_port]).to eq("2430")
-      end
+        let(:expected_opts) {
+          {
+            port: 250,
+            user: "test",
+            logger: Chef::Log,
+            password: "opscode"
+          }
+        }
+        it "generates the correct options" do
+          expect(knife.base_opts).to eq expected_opts
+        end
 
-      it "configures the ssh agent forwarding" do
-        expect(knife_ssh.config[:forward_agent]).to eq(true)
       end
+      context "when password is not provided" do
+        before do
+          knife.config[:port] = 250
+          knife.config[:user] = "test"
+        end
 
-      it "configures the ssh identity file" do
-        expect(knife_ssh.config[:ssh_identity_file]).to eq("~/.ssh/you.rsa")
-      end
-
-      it "configures the ssh gateway" do
-        expect(knife_ssh.config[:ssh_gateway]).to eq("towel.blinkenlights.nl")
-      end
-
-      it "configures the ssh gateway identity" do
-        expect(knife_ssh.config[:ssh_gateway_identity]).to eq("~/.ssh/gateway.rsa")
-      end
-
-      it "configures the host key verify mode" do
-        expect(knife_ssh.config[:host_key_verify]).to eq(true)
-      end
-    end
-
-    describe "when falling back to password auth when host key auth fails" do
-      let(:knife_ssh_with_password_auth) do
-        knife.name_args = ["foo.example.com"]
-        knife.config[:ssh_user] = "rooty"
-        knife.config[:ssh_identity_file] = "~/.ssh/me.rsa"
-        allow(knife).to receive(:render_template).and_return("")
-        k = knife.knife_ssh
-        allow(k).to receive(:get_password).and_return("typed_in_password")
-        allow(knife).to receive(:knife_ssh).and_return(k)
-        knife.knife_ssh_with_password_auth
-      end
-
-      it "prompts the user for a password " do
-        expect(knife_ssh_with_password_auth.config[:ssh_password]).to eq("typed_in_password")
-      end
-
-      it "configures knife not to use the identity file that didn't work previously" do
-        expect(knife_ssh_with_password_auth.config[:ssh_identity_file]).to be_nil
+        let(:expected_opts) {
+          {
+            port: 250,
+            user: "test",
+            logger: Chef::Log
+          }
+        }
+        it "generates the correct options" do
+          expect(knife.base_opts).to eq expected_opts
+        end
       end
     end
   end
+
+  context "#host_verify_opts" do
+    let(:connection_protocol) { nil }
+    before do
+      allow(knife).to receive(:connection_protocol).and_return connection_protocol
+    end
+
+    context "for winrm" do
+      let(:connection_protocol) { "winrm" }
+      it "returns the expected configuration" do
+        knife.config[:winrm_no_verify_cert] = true
+        expect(knife.host_verify_opts).to eq( { self_signed: true } )
+      end
+      it "provides a correct default when no option given" do
+        expect(knife.host_verify_opts).to eq( { self_signed: false } )
+      end
+    end
+
+    context "for ssh" do
+      let(:connection_protocol) { "ssh" }
+      it "returns the expected configuration" do
+        knife.config[:ssh_verify_host_key] = false
+        expect(knife.host_verify_opts).to eq( { verify_host_key: false } )
+      end
+      it "provides a correct default when no option given" do
+        expect(knife.host_verify_opts).to eq( { verify_host_key: true } )
+      end
+    end
+  end
+
+  context "#ssh_identity_opts" do
+    let(:connection_protocol) { nil }
+    before do
+      allow(knife).to receive(:connection_protocol).and_return connection_protocol
+    end
+
+    context "for winrm" do
+      let(:connection_protocol) { "winrm" }
+      it "returns an empty hash" do
+        expect(knife.ssh_identity_opts).to eq({})
+      end
+    end
+
+    context "for ssh" do
+      let(:connection_protocol) { "ssh" }
+      context "when an identity file is specified" do
+        before do
+          knife.config[:ssh_identity_file] = "/identity.pem"
+        end
+        it "generates the expected configuration" do
+          expect(knife.ssh_identity_opts).to eq({
+              identity_files: [ "/identity.pem" ],
+              keys_only: true
+            })
+        end
+
+        context "and a gateway identity file is also specified" do
+          before do
+            knife.config[:ssh_gateway_identity] = "/gateway.pem"
+          end
+
+          it "generates the expected configuration (both keys, keys_only true)" do
+            expect(knife.ssh_identity_opts).to eq({
+              identity_files: [ "/identity.pem", "/gateway.pem" ],
+              keys_only: true
+            })
+          end
+        end
+      end
+
+      context "when no identity file is specified" do
+        it "generates the expected configuration (no keys, keys_only false)" do
+          expect(knife.ssh_identity_opts).to eq( {
+            identity_files: [ ],
+            keys_only: false
+          })
+        end
+        context "and a gateway identity file is specified" do
+          before do
+            knife.config[:ssh_gateway_identity] = "/gateway.pem"
+          end
+          it "generates the expected configuration (gateway key, keys_only false)" do
+            expect(knife.ssh_identity_opts).to eq({
+              identity_files: [ "/gateway.pem" ],
+              keys_only: false
+            })
+          end
+        end
+      end
+    end
+  end
+
+  context "#gateway_opts" do
+    let(:connection_protocol) { nil }
+    before do
+      allow(knife).to receive(:connection_protocol).and_return connection_protocol
+    end
+
+    context "for winrm" do
+      let(:connection_protocol) { "winrm" }
+      it "returns an empty hash" do
+        expect(knife.gateway_opts).to eq({})
+      end
+    end
+
+    context "for ssh" do
+      let(:connection_protocol) { "ssh" }
+      context "and ssh_gateway with hostname, user and port provided" do
+        before do
+          knife.config[:ssh_gateway] = "testuser@gateway:9021"
+        end
+        it "returns a proper bastion host config subset" do
+          expect(knife.gateway_opts).to eq({
+            bastion_user: "testuser",
+            bastion_host: "gateway",
+            bastion_port: 9021
+          })
+        end
+      end
+      context "and ssh_gateway with only hostname is given" do
+        before do
+          knife.config[:ssh_gateway] = "gateway"
+        end
+        it "returns a proper bastion host config subset" do
+          expect(knife.gateway_opts).to eq({
+            bastion_user: nil,
+            bastion_host: "gateway",
+            bastion_port: nil
+          })
+        end
+      end
+      context "and ssh_gateway with hostname and user is is given" do
+        before do
+          knife.config[:ssh_gateway] = "testuser@gateway"
+        end
+        it "returns a proper bastion host config subset" do
+          expect(knife.gateway_opts).to eq({
+            bastion_user: "testuser",
+            bastion_host: "gateway",
+            bastion_port: nil
+          })
+        end
+      end
+
+      context "and ssh_gateway with hostname and port is is given" do
+        before do
+          knife.config[:ssh_gateway] = "gateway:11234"
+        end
+        it "returns a proper bastion host config subset" do
+          expect(knife.gateway_opts).to eq({
+            bastion_user: nil,
+            bastion_host: "gateway",
+            bastion_port: 11234
+          })
+        end
+      end
+
+      context "and ssh_gateway is not provided" do
+        it "returns an empty hash" do
+          expect(knife.gateway_opts).to eq({})
+        end
+      end
+    end
+  end
+
+  context "#sudo_opts" do
+    let(:connection_protocol) { nil }
+    before do
+      allow(knife).to receive(:connection_protocol).and_return connection_protocol
+    end
+
+    context "for winrm" do
+      let(:connection_protocol) { "winrm" }
+      it "returns an empty hash" do
+        expect(knife.sudo_opts).to eq({})
+      end
+    end
+
+    context "for ssh" do
+      let(:connection_protocol) { "ssh" }
+      context "when use_sudo is set" do
+        before do
+          knife.config[:use_sudo] = true
+        end
+
+        it "returns a config that enables sudo" do
+            expect(knife.sudo_opts).to eq( { sudo: true} )
+        end
+
+        context "when use_sudo_password is also set" do
+          before do
+            knife.config[:use_sudo_password] = true
+            knife.config[:password] = "opscode"
+          end
+          it "includes :password value in a sudo-enabled configuration" do
+            expect(knife.sudo_opts).to eq({
+              sudo: true,
+              sudo_password: "opscode"
+            })
+          end
+
+        end
+
+        context "when preserve_home is set" do
+          before do
+            knife.config[:preserve_home] = true
+          end
+          it "enables sudo with sudo_option to preserve home" do
+            expect(knife.sudo_opts).to eq({
+              sudo_options: "-H",
+              sudo: true
+            })
+          end
+        end
+
+      end
+
+      context "when use_sudo is not set" do
+          before do
+            knife.config[:use_sudo_password] = true
+            knife.config[:preserve_home] = true
+          end
+          it "returns configuration for sudo off, ignoring other related options" do
+            expect(knife.sudo_opts).to eq( { sudo: false} )
+          end
+        end
+      end
+  end
+
+  context "#winrm_opts" do
+    let(:connection_protocol) { nil }
+    before do
+      allow(knife).to receive(:connection_protocol).and_return connection_protocol
+    end
+
+    context "for winrm" do
+      let(:connection_protocol) { "winrm" }
+      let(:expected) { {
+        winrm_transport: "negotiate",
+        winrm_basic_auth_only: false,
+        ssl: false,
+        ssl_peer_fingerprint: nil
+      }}
+
+      it "generates a correct configuration hash with expected defaults" do
+        expect(knife.winrm_opts).to eq expected
+      end
+
+      context "with ssl_peer_fingerprint" do
+        let(:ssl_peer_fingerprint_expected) {
+          expected.merge({ ssl_peer_fingerprint: "ABCD"})
+        }
+
+        before do
+          knife.config[:winrm_ssl_peer_fingerprint] = "ABCD"
+        end
+
+        it "generates a correct options hash with ssl_peer_fingerprint from the config provided" do
+          expect(knife.winrm_opts).to eq ssl_peer_fingerprint_expected
+        end
+      end
+
+      context "with winrm_ssl" do
+        let(:ssl_expected) {
+          expected.merge({ ssl: true })
+        }
+        before do
+          knife.config[:winrm_ssl] = true
+        end
+
+        it "generates a correct options hash with ssl from the config provided" do
+          expect(knife.winrm_opts).to eq ssl_expected
+        end
+      end
+
+      context "with winrm_auth_method" do
+        let(:winrm_auth_method_expected) {
+          expected.merge({ winrm_transport: "freeaccess" })
+        }
+
+        before do
+          knife.config[:winrm_auth_method] = "freeaccess"
+        end
+
+        it "generates a correct options hash with winrm_transport from the config provided" do
+          expect(knife.winrm_opts).to eq winrm_auth_method_expected
+        end
+      end
+
+      context "with ca_trust_path" do
+        let(:ca_trust_expected) {
+          expected.merge({ ca_trust_file: "/trust.me"})
+        }
+        before do
+          knife.config[:ca_trust_path] = "/trust.me"
+        end
+
+        it "generates a correct options hash with ca_trust_file from the config provided" do
+          expect(knife.winrm_opts).to eq ca_trust_expected
+        end
+      end
+
+      context "with kerberos auth" do
+        let(:kerberos_expected) {
+          expected.merge({
+            kerberos_service: "testsvc",
+            kerberos_realm: "TESTREALM",
+            winrm_transport: "kerberos"
+          })
+        }
+
+        before do
+          knife.config[:winrm_auth_method] = "kerberos"
+          knife.config[:kerberos_service] = "testsvc"
+          knife.config[:kerberos_realm] = "TESTREALM"
+        end
+
+        it "generates a correct options hash containing kerberos auth configuration from the config provided" do
+          expect(knife.winrm_opts).to eq kerberos_expected
+        end
+      end
+
+      context "with winrm_basic_auth_only" do
+        before do
+          knife.config[:winrm_basic_auth_only] = true
+        end
+        let(:basic_auth_expected) {
+          expected.merge( { winrm_basic_auth_only: true } )
+        }
+        it "generates a correct options hash containing winrm_basic_auth_only from the config provided" do
+          expect(knife.winrm_opts).to eq basic_auth_expected
+        end
+      end
+    end
+
+    context "for ssh" do
+      let(:connection_protocol) { "ssh" }
+      it "returns an empty hash because ssh is not winrm" do
+        expect(knife.winrm_opts).to eq({})
+      end
+    end
+  end
+  describe "#run" do
+    before do
+      allow(knife.client_builder).to receive(:client_path).and_return("/key.pem")
+    end
+
+    it "performs the steps we expect to run a bootstrap"  do
+      expect(knife).to receive(:validate_name_args!).ordered
+      expect(knife).to receive(:validate_protocol!).ordered
+      expect(knife).to receive(:validate_first_boot_attributes!).ordered
+      expect(knife).to receive(:validate_winrm_transport_opts!).ordered
+      expect(knife).to receive(:validate_policy_options!).ordered
+
+      expect(knife).to receive(:register_client).ordered
+      expect(knife).to receive(:connect!).ordered
+      expect(knife).to receive(:render_template).and_return "content"
+      expect(knife).to receive(:upload_bootstrap).with("content").and_return "/remote/path.sh"
+      expect(knife).to receive(:perform_bootstrap).with("/remote/path.sh")
+      expect(target_host).to receive(:del_file) # Make sure cleanup happens
+
+      knife.run
+
+      # Post-run verify expected state changes (not many directly in #run)
+      expect(knife.bootstrap_context.client_pem).to eq "/key.pem"
+      expect($stdout.sync).to eq true
+    end
+  end
+
+  describe "#register_client" do
+    let(:vault_handler_mock) { double("ChefVaultHandler") }
+    let(:client_builder_mock) { double("ClientBuilder") }
+    let(:node_name) { nil }
+    before do
+      allow(knife).to receive(:chef_vault_handler).and_return vault_handler_mock
+      allow(knife).to receive(:client_builder).and_return client_builder_mock
+      knife.config[:chef_node_name] = node_name
+    end
+
+    shared_examples_for "creating the client locally" do
+      context "when a valid node name is present" do
+        let(:node_name) { "test" }
+        before do
+          allow(client_builder_mock).to receive(:client).and_return "client"
+        end
+
+        it "runs client_builder and vault_handler" do
+          expect(client_builder_mock).to receive(:run)
+          expect(vault_handler_mock).to receive(:run).with("client")
+          knife.register_client
+        end
+      end
+
+      context "when no valid node name is present" do
+        let(:node_name) { nil }
+        it "shows an error and exits" do
+          expect(knife.ui).to receive(:error)
+          expect{knife.register_client}.to raise_error(SystemExit)
+        end
+      end
+    end
+    context "when chef_vault_handler says we're using vault" do
+      let(:vault_handler_mock) { double("ChefVaultHandler") }
+      before do
+        allow(vault_handler_mock).to receive(:doing_chef_vault?).and_return true
+      end
+      it_behaves_like "creating the client locally"
+    end
+
+    context "when an non-existant validation key is specified in chef config" do
+      before do
+        Chef::Config[:validation_key] = "/blah"
+        allow(vault_handler_mock).to receive(:doing_chef_vault?).and_return false
+        allow(File).to receive(:exist?).with("/blah").and_return false
+      end
+      it_behaves_like "creating the client locally"
+    end
+
+    context "when a valid validation key is given and we're doing old-style client creation" do
+      before do
+        Chef::Config[:validation_key] = "/blah"
+        allow(File).to receive(:exist?).with("/blah").and_return true
+        allow(vault_handler_mock).to receive(:doing_chef_vault?).and_return false
+      end
+
+      it "shows a message" do
+        expect(knife.ui).to receive(:info)
+        knife.register_client
+      end
+    end
+  end
+
+  describe "#perform_bootstrap" do
+    let(:exit_status) { 0 }
+    let(:result_mock) { double("result", exit_status: exit_status, stderr: "A message") }
+
+    before do
+      allow(target_host).to receive(:hostname).and_return "testhost"
+    end
+    it "runs the remote script and logs the output" do
+      expect(knife.ui).to receive(:info).with(/Bootstrapping.*/)
+      expect(knife).to receive(:bootstrap_command).
+        with("/path.sh").
+        and_return("sh /path.sh")
+      expect(target_host).
+        to receive(:run_command).
+        with("sh /path.sh").
+        and_yield("output here").
+        and_return result_mock
+
+      expect(knife.ui).to receive(:msg).with(/testhost/)
+      knife.perform_bootstrap("/path.sh")
+    end
+    context "when the remote command fails" do
+      let(:exit_status) { 1 }
+      it "shows an error and exits" do
+        expect(knife.ui).to receive(:info).with(/Bootstrapping.*/)
+        expect(knife).to receive(:bootstrap_command).
+          with("/path.sh").
+          and_return("sh /path.sh")
+        expect(target_host).to receive(:run_command).with("sh /path.sh").and_return result_mock
+        expect{knife.perform_bootstrap("/path.sh")}.to raise_error(SystemExit)
+      end
+    end
+  end
+
+
+  describe "#connect!" do
+    context "in the normal case" do
+      it "connects using the connection_opts and notifies the operator of progress" do
+        expect(knife.ui).to receive(:info).with(/Connecting to.*/)
+        expect(knife).to receive(:connection_opts).and_return( { opts: "here" })
+        expect(knife).to receive(:do_connect).with( { opts: "here" } )
+        knife.connect!
+      end
+    end
+
+    context "when a non-auth-failure occurs" do
+      let(:expected_error) { RuntimeError.new }
+      before do
+        allow(knife).to receive(:do_connect).and_raise(expected_error)
+      end
+      it "re-raises the exception" do
+        expect{knife.connect!}.to raise_error(expected_error)
+      end
+    end
+
+    context "when an auth failure occurs" do
+      let(:expected_error) {
+        # TODO This is awkward and ugly. Requires some refactor of chef_core/error
+        # to make it not so.  See comment in rescue block of connect! for details.
+        e = RuntimeError.new
+        interim = RuntimeError.new
+        actual = Net::SSH::AuthenticationFailed.new
+        allow(interim).to receive(:cause).and_return(actual)
+        allow(e).to receive(:cause).and_return(interim)
+        e
+      }
+
+      before do
+        require 'net/ssh'
+      end
+
+      context "and password auth was used" do
+        before do
+          knife.config[:password] = "tryme"
+        end
+
+        it "re-raises the error so as not to resubmit the same failing password" do
+          expect(knife).to receive(:do_connect).and_raise(expected_error)
+          expect{knife.connect!}.to raise_error(expected_error)
+        end
+      end
+
+      context "and password auth was not used" do
+        before do
+          knife.config[:password] = nil
+          allow(target_host).to receive(:user).and_return "testuser"
+        end
+
+        it "warns, prompts for password, then reconnects with a password-enabled configuration using the new password" do
+          expect(knife).to receive(:do_connect).and_raise(expected_error)
+          expect(knife.ui).to receive(:warn).with(/Failed to auth.*/)
+          expect(knife.ui).to receive(:ask).and_return("newpassword")
+          expect(knife).to receive(:do_connect) do |opts|
+             expect(opts[:password]).to eq "newpassword"
+          end
+          knife.connect!
+        end
+      end
+    end
+  end
+
+
 
   it "verifies that a server to bootstrap was given as a command line arg" do
     knife.name_args = nil
@@ -749,116 +1361,24 @@ describe Chef::Knife::Bootstrap do
     expect(stderr.string).to match(/ERROR:.+FQDN or ip/)
   end
 
-  describe "when running the bootstrap" do
-    let(:knife_ssh) do
-      knife.name_args = ["foo.example.com"]
-      knife.config[:chef_node_name] = "foo.example.com"
-      knife.config[:ssh_user] = "rooty"
-      knife.config[:ssh_identity_file] = "~/.ssh/me.rsa"
-      allow(knife).to receive(:render_template).and_return("")
-      knife_ssh = knife.knife_ssh
-      allow(knife).to receive(:knife_ssh).and_return(knife_ssh)
-      knife_ssh
-    end
-    let(:client) { Chef::ApiClient.new }
-
-    context "when running with a configured and present validation key" do
-      before do
-        # this tests runs the old code path where we have a validation key, so we need to pass that check
-        allow(File).to receive(:exist?).with(File.expand_path(Chef::Config[:validation_key])).and_return(true)
-      end
-
-      it "configures the underlying ssh command and then runs it" do
-        expect(knife_ssh).to receive(:run)
-        knife.run
-      end
-
-      it "falls back to password based auth when auth fails the first time" do
-        allow(knife).to receive(:puts)
-
-        fallback_knife_ssh = knife_ssh.dup
-        expect(knife_ssh).to receive(:run).and_raise(Net::SSH::AuthenticationFailed.new("no ssh for you"))
-        allow(knife).to receive(:knife_ssh_with_password_auth).and_return(fallback_knife_ssh)
-        expect(fallback_knife_ssh).to receive(:run)
-        knife.run
-      end
-
-      it "raises the exception if config[:ssh_password] is set and an authentication exception is raised" do
-        knife.config[:ssh_password] = "password"
-        expect(knife_ssh).to receive(:run).and_raise(Net::SSH::AuthenticationFailed)
-        expect { knife.run }.to raise_error(Net::SSH::AuthenticationFailed)
-      end
-
-      it "creates the client and adds chef-vault items if vault_list is set" do
-        knife.config[:bootstrap_vault_file] = "/not/our/responsibility/to/check/if/this/exists"
-        expect(knife_ssh).to receive(:run)
-        expect(knife.client_builder).to receive(:run)
-        expect(knife.client_builder).to receive(:client).and_return(client)
-        expect(knife.chef_vault_handler).to receive(:run).with(client)
-        knife.run
-      end
-
-      it "creates the client and adds chef-vault items if vault_items is set" do
-        knife.config[:bootstrap_vault_json] = '{ "vault" => "item" }'
-        expect(knife_ssh).to receive(:run)
-        expect(knife.client_builder).to receive(:run)
-        expect(knife.client_builder).to receive(:client).and_return(client)
-        expect(knife.chef_vault_handler).to receive(:run).with(client)
-        knife.run
-      end
-
-      it "does old-style validation without creating a client key if vault_list+vault_items is not set" do
-        expect(File).to receive(:exist?).with(File.expand_path(Chef::Config[:validation_key])).and_return(true)
-        expect(knife_ssh).to receive(:run)
-        expect(knife.client_builder).not_to receive(:run)
-        expect(knife.chef_vault_handler).not_to receive(:run)
-        knife.run
-      end
-
-      it "raises an exception if the config[:chef_node_name] is not present" do
-        knife.config[:chef_node_name] = nil
-
-        expect { knife.run }.to raise_error(SystemExit)
+  describe "#bootstrap_context" do
+    context "under Windows" do
+      let(:base_os) { :windows }
+      it "creates a WindowsBootstrapContext" do
+        require 'chef/knife/core/windows_bootstrap_context'
+        expect(knife.bootstrap_context.class).to eq Chef::Knife::Core::WindowsBootstrapContext
       end
     end
 
-    context "when the validation key is not present" do
-      before do
-        # this tests runs the old code path where we have a validation key, so we need to pass that check
-        allow(File).to receive(:exist?).with(File.expand_path(Chef::Config[:validation_key])).and_return(false)
-      end
-
-      it "creates the client (and possibly adds chef-vault items)" do
-        expect(knife_ssh).to receive(:run)
-        expect(knife.client_builder).to receive(:run)
-        expect(knife.client_builder).to receive(:client).and_return(client)
-        expect(knife.chef_vault_handler).to receive(:run).with(client)
-        knife.run
-      end
-
-      it "raises an exception if the config[:chef_node_name] is not present" do
-        knife.config[:chef_node_name] = nil
-
-        expect { knife.run }.to raise_error(SystemExit)
-      end
-    end
-
-    context "when the validation_key is nil" do
-      before do
-        # this tests runs the old code path where we have a validation key, so we need to pass that check for some plugins
-        Chef::Config[:validation_key] = nil
-      end
-
-      it "creates the client and does not run client_builder or the chef_vault_handler" do
-        expect(knife_ssh).to receive(:run)
-        expect(knife.client_builder).not_to receive(:run)
-        expect(knife.chef_vault_handler).not_to receive(:run)
-        knife.run
+    context "under linux" do
+      let(:base_os) { :linux }
+      it "creates a BootstrapContext" do
+        require 'chef/knife/core/bootstrap_context'
+        expect(knife.bootstrap_context.class).to eq Chef::Knife::Core::BootstrapContext
       end
     end
   end
 
-  describe "specifying ssl verification" do
-
-  end
 end
+
+

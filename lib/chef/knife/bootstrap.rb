@@ -28,10 +28,11 @@ class Chef
   class Knife
     class Bootstrap < Knife
       include DataBagSecretOptions
-
       # Command line flags and options for bootstrap - there's a large number of them
       # so we'll keep this file a little smaller by splitting them out.
       include Bootstrap::Options
+
+      SUPPORTED_CONNECTION_PROTOCOLS = %w{ssh winrm}
 
       attr_accessor :client_builder
       attr_accessor :chef_vault_handler
@@ -131,17 +132,17 @@ class Chef
         @secret ||= encryption_secret_provided_ignore_encrypt_flag? ? read_secret : nil
       end
 
+      # Establish bootstrap context for template rendering.
+      # Requires target_host to be a live connection in order to determine
+      # the correct platform.
       def bootstrap_context
         @bootstrap_context ||=
           if target_host.base_os == :windows
-
             require "chef/knife/core/windows_bootstrap_context"
-            Knife::Core::WindowsBootstrapContext.new(config, config[:run_list],
-                                                     Chef::Config, secret)
+            Knife::Core::WindowsBootstrapContext.new(config, config[:run_list], Chef::Config, secret)
           else
             require "chef/knife/core/bootstrap_context"
-            Knife::Core::BootstrapContext.new(config, config[:run_list],
-                                              Chef::Config, secret)
+            Knife::Core::BootstrapContext.new(config, config[:run_list], Chef::Config, secret)
           end
       end
 
@@ -157,48 +158,57 @@ class Chef
       end
 
       def run
-        if @config[:first_boot_attributes] && @config[:first_boot_attributes_from_file]
-          raise Chef::Exceptions::BootstrapCommandInputError
-        end
-
         validate_name_args!
-        validate_options!
+        validate_protocol!
+        validate_first_boot_attributes!
+        validate_winrm_transport_opts!
+        validate_policy_options!
 
         $stdout.sync = true
+        register_client
+        connect!
+        unless client_builder.client_path.nil?
+          bootstrap_context.client_pem = client_builder.client_path
+        end
+        content = render_template
+        bootstrap_path = upload_bootstrap(content)
+        perform_bootstrap(bootstrap_path)
+      ensure
+        target_host.del_file(bootstrap_path) if target_host && bootstrap_path
+      end
 
-        bootstrap_path = nil
-
+      def register_client
         # chef-vault integration must use the new client-side hawtness, otherwise to use the
         # new client-side hawtness, just delete your validation key.
+        # 2019-04-01 TODO
+        # TODO -  should this raise if config says to use vault because json/file/item exists
+        #         but we still have a validation key?  That means we can't use the new client hawtness,
+        #         but we also don't tell the operator that their requested vault operations
+        #         won't be performed.
         if chef_vault_handler.doing_chef_vault? ||
-            (Chef::Config[:validation_key] && !File.exist?(File.expand_path(Chef::Config[:validation_key])))
+            (Chef::Config[:validation_key] &&
+             !File.exist?(File.expand_path(Chef::Config[:validation_key])))
 
           unless config[:chef_node_name]
             ui.error("You must pass a node name with -N when bootstrapping with user credentials")
             exit 1
           end
-
           client_builder.run
-
           chef_vault_handler.run(client_builder.client)
-
         else
-          ui.info("Doing old-style registration with the validation key at #{Chef::Config[:validation_key]}...")
-          ui.info("Delete your validation key in order to use your user credentials instead")
-          ui.info("")
+          ui.info <<~EOM
+              Doing old-style registration with the validation key at #{Chef::Config[:validation_key]}..."
+              Delete your validation key in order to use your user credentials instead
+            EOM
+
         end
+      end
 
-        connect!
 
-        # Now that we have a connected target_host, we can use (by referencing it...)
-        # "bootstrap_context".
-        unless client_builder.client_path.nil?
-          bootstrap_context.client_pem = client_builder.client_path
-        end
-
-        bootstrap_path = render_and_upload_bootstrap
+      def perform_bootstrap(remote_bootstrap_script_path)
         ui.info("Bootstrapping #{ui.color(server_name, :bold)}")
-        r = target_host.run_command(bootstrap_command(bootstrap_path)) do |data|
+        cmd = bootstrap_command(remote_bootstrap_script_path)
+        r = target_host.run_command(cmd) do |data|
           ui.msg("#{ui.color(" [#{target_host.hostname}]", :cyan)} #{data}")
         end
         if r.exit_status != 0
@@ -206,18 +216,17 @@ class Chef
           ui.error(r.stderr)
           exit 1
         end
-      ensure
-        target_host.del_file(bootstrap_path) if target_host && bootstrap_path
       end
 
       def connect!
+
         ui.info("Connecting to #{ui.color(server_name, :bold)}")
         opts = connection_opts.dup
-        do_connect(opts) # rescue: TargetResolverError
+        do_connect(opts)
       rescue => e
-        # Ugh. TODO 1: Train raises a Train::Transports::SSHFailed for a number of different errors. chef_core makes that
+        # Ugh. TODO: Train raises a Train::Transports::SSHFailed for a number of different errors. chef_core makes that
         # a more general ConnectionFailed, with an error code based on the specific error text/reason provided from trainm.
-        # This means we have to look three layers intot he exception to find out what actually happened instead of just
+        # This means we have to look three layers into the exception to find out what actually happened instead of just
         # looking at the exception type
         #
         # It doesn't help to provide our own error if it does't let the caller know what they need to identify the problem.
@@ -225,33 +234,75 @@ class Chef
         # (eg ChefCore::ConnectionFailed::AuthError or similar) that will work across protocols, instead of just a single
         # ConnectionFailure type
         #
-        # # TODO 2 - it is possible for train to automatically do the reprompt for password
-        #            but that will take a little digging through the train ssh protocol layer.
+
         if e.cause && e.cause.cause && e.cause.cause.class == Net::SSH::AuthenticationFailed
           if opts[:password]
             raise
           else
-            ui.warn("Failed to authenticate #{target_host.user} - trying password auth")
-            password = ui.ask("Enter password for #{target_host.user}@#{target_host.hostname}: ") do |q|
+            # TODO will this do the wrong thing if user is provided in url, eg ssh://me@hostname?
+            ui.warn("Failed to authenticate #{opts[:user]} to #{server_name} - trying password auth")
+            password = ui.ask("Enter password for #{opts[:user]}@#{server_name} - trying password auth") do |q|
               q.echo = false
             end
-            update_connection_opts_for_forced_password(opts, password)
-            do_connect(opts)
           end
+          opts.merge! force_ssh_password_opts(password)
+          do_connect(opts)
         else
           raise
         end
+      end
+
+      def connection_protocol
+        return @connection_protocol if @connection_protocol
+        from_url = host_descriptor  =~ /^(.*):\/\// ? $1 : nil
+        from_cli = config[:protocol]
+        from_knife = Chef::Config[:knife][:bootstrap_protocol]
+        @connection_protocol = from_url || from_cli || from_knife || "ssh"
       end
 
       def do_connect(conn_options)
         # Resolve the given host name to a TargetHost instance. We will limit
         # the number of hosts to 1 (effectivly eliminating wildcard support) since
         # we only support running bootstrap against one host at a time.
-        resolver = ChefCore::TargetResolver.new(host_descriptor, config[:protocol] || "ssh",
+        resolver = ChefCore::TargetResolver.new(host_descriptor, connection_protocol,
                                                 conn_options, max_expanded_targets: 1)
         @target_host = resolver.targets.first
         @target_host.connect!
         @target_host
+      end
+
+      # Fail if both first_boot_attributes and first_boot_attributes_from_file
+      # are set.
+      def validate_first_boot_attributes!
+        if @config[:first_boot_attributes] && @config[:first_boot_attributes_from_file]
+          raise Chef::Exceptions::BootstrapCommandInputError
+        end
+        true
+      end
+
+      # Fail if using plaintext auth without ssl because
+      # this can expose keys in plaintext on the wire.
+      # TODO test for this method
+      def validate_winrm_transport_opts!
+        return true if connection_protocol != "winrm"
+
+
+        if (Chef::Config[:validation_key] && !File.exist?(File.expand_path(Chef::Config[:validation_key])))
+          if (config_value(:winrm_auth_method) == "plaintext" &&
+              config_value(:winrm_ssl) != true)
+            ui.error <<~EOM
+                      Validatorless bootstrap over unsecure winrm channels could expose your
+                      key to network sniffing.
+
+                      Please use a 'winrm_auth_method' other than 'plaintext',
+                      or enable ssl on #{server_name} then use the --ssl flag
+                      to connect.
+                    EOM
+
+            exit 1
+          end
+        end
+        true
       end
 
       # fail if the server_name is nil
@@ -269,7 +320,7 @@ class Chef
       #   * Policyfile options are set and --run-list is set as well
       #
       # @return [TrueClass] If options are valid.
-      def validate_options!
+      def validate_policy_options!
         if incomplete_policyfile_options?
           ui.error("--policy-name and --policy-group must be specified together")
           exit 1
@@ -277,92 +328,214 @@ class Chef
           ui.error("Policyfile options and --run-list are exclusive")
           exit 1
         end
+      end
+
+      # Ensure a valid protocol is provided for target host connection
+      #
+      # The method call will cause the program to exit(1) if:
+      #   * Conflicting protocols are given via the target URI and the --protocol option
+      #   * The protocol is not a supported protocol
+      #
+      # @return [TrueClass] If options are valid.
+      def validate_protocol!
+        from_cli = config[:protocol]
+        if (from_cli && connection_protocol != from_cli)
+          # Hanging indent to align with the ERROR: prefix
+          ui.error <<~EOM
+             The URL '#{host_descriptor}' indicates protocol is '#{connection_protocol}'
+             while the --protocol flag specifies '#{from_cli}'.  Please include
+             only one or the other.
+           EOM
+          exit 1
+        end
+
+        unless SUPPORTED_CONNECTION_PROTOCOLS.include?(connection_protocol)
+          ui.error <<~EOM
+            Unsupported protocol '#{connection_protocol}'.
+
+            Supported protocols are: #{SUPPORTED_CONNECTION_PROTOCOLS.join(" ")}
+          EOM
+          exit 1
+        end
         true
       end
 
-      # Createa configuration object based on setup a Chef::Knife::Ssh object using the passed config options
-      # Includes connection information for both supported protocols at this time - unused config is ignored.
+      # Create a configuration hash for TargetHost to connect
+      # to the remote host via Train.
       #
-      # @return a configuration hash suitable for connecting to the remote host via TargetHost.
+      # @return a configuration hash suitable for connecting to the remote
+      # host via TargetHost.
       def connection_opts
-        # Mapping of our options to TargetHost/train options - they're pretty similar with removal of
-        # the ssh- prefix, but there's more to correct
-        opts = {
-          port: config[:port], # Default if it's not in the connection string
-          user: config[:user], #  "
-          password: config[:password], # TODO - check if we need to exclude if not set, diff behavior for nil?
-          forward_agent: config[:forward_agent] || false ,
-          logger:  Chef::Log,
-          key_files: [],
-          # WinRM options - they will be ignored for ssh
-          # TODO train will throw if this is not valid, should be OK as-is
-          winrm_transport: config[:winrm_transport],
-          self_signed: config[:winrm_no_verify_cert] === true,
-          winrm_basic_auth_only: config[:winrm_basic_auth_only],
-          ssl: config[:winrm_ssl],
-          ssl_peer_fingerprint: config[:winrm_ssl_peer_fingerprint]
+        return @connection_opts unless @connection_opts.nil?
+        @connection_opts = {}
+        @connection_opts.merge! base_opts
+        @connection_opts.merge! host_verify_opts
+        @connection_opts.merge! gateway_opts
+        @connection_opts.merge! sudo_opts
+        @connection_opts.merge! winrm_opts
+        @connection_opts.merge! ssh_opts
+        @connection_opts.merge! ssh_identity_opts
+        @connection_opts
+      end
 
-          # NOTE: 'ssl' true is different from using the ssl auth protocol which supoorts
-          #       using client cert+key (though we dongtgt
-        }
-
-        if opts[:ssh_identity_file]
-          opts[:keys_only] = true
-          opts[:key_files] << config[:ssh_identity_file]
+      # Common configuration for all protocols
+      def base_opts
+        port_fallback = "#{connection_protocol}_port".to_sym
+        user_fallback = "#{connection_protocol}_user".to_sym
+        port = config_value(:port, port_fallback)
+        user = config_value(:user, user_fallback)
+        {}.tap do |opts|
+          opts[:logger] = Chef::Log
+          opts[:password] = config[:password] if config.key?(:password)
+          opts[:user] = user if user
+          opts[:port] = port if port
         end
+      end
 
-        if config[:ssh_gateway]
-          gw_host, gw_user = config[:ssh_gateway].split("@").reverse
-          gw_host, gw_port = gw_host.split(":")
-          opts[:bastion_host] = gw_host
-          opts[:bastion_port] = gw_port
-          opts[:bastion_user] = gw_user
-          if config[:ssh_gatway_identity]
-            opts[:key_files] << config[:ssh_gateway_identity]
-          end
+      def host_verify_opts
+        case connection_protocol
+        when "winrm"
+          { self_signed: config_value(:winrm_no_verify_cert) === true }
+        when "ssh"
+          # TODO deprecate host_key_verify in knife config, replace with ssh_verify_host_key
+          { verify_host_key: config_value(:ssh_verify_host_key,
+                                          :host_key_verify, nil) === true }
+        else
+          {}
         end
+      end
+      def ssh_opts
+        opts = {}
+        return opts if connection_protocol == "winrm"
 
-        if config[:use_sudo]
-          opts[:sudo] = true
-          if opts[:use_sudo_password]
-            opts[:sudo_password] = config[:password]
-          end
-          if opts[:preserve_home]
-             opts[:sudo_options] = "-H"
-          end
-        end
-
-        # REVIEWERS - maybe we combine this and winrm_no_verify_cert flags into "--no-verify-target"?
-        opts[:host_key_verify] = config[:host_key_verify].nil? ? true : config[:host_key_verify]
-
-        if config[:password]
-          opts[:password] = config[:password]
-        end
-
-
-        opts[:winrm_transport] = config[:winrm_auth_method]
-        if config[:winrm_auth_method] == "kerberos"
-          opts[:kerberos_service] = config[:kerberos_service]
-          opts[:kerberos_realm] = config[:kerberos_realm]
-        end
-
-        opts[:ca_trust_path] = config[:ca_trust_path]
-
-        opts[:winrm_basic_auth_only] = config[:winrm_basic_auth_only] if config[:winrm_basic_auth_only]
         opts
       end
 
 
-      def update_connection_opts_for_forced_password(opts, password)
-        opts[:password] = password
-        opts[:non_interactive] = false
-        opts[:keys_only] = false
-        opts[:key_files] = nil
-        opts[:auth_methods] = [:password, :keyboard_interactive]
+      def ssh_identity_opts
+        opts = {}
+        return opts if connection_protocol == "winrm"
+        identity_file = config_value(:ssh_identity_file)
+        if identity_file
+          opts[:identity_files] = [identity_file]
+          # We only set keys_only based on the explicit ssh_identity_file;
+          # someone may use a gateway key and still expect password auth
+          # on the target.
+          opts[:keys_only] = true
+        else
+          opts[:identity_files] = []
+          opts[:keys_only] = false
+        end
+
+        gateway_identity_file = config_value(:ssh_gateway_identity)
+        unless gateway_identity_file.nil?
+          opts[:identity_files] << gateway_identity_file
+        end
+
+        opts
       end
 
-      def render_and_upload_bootstrap
-        content = render_template
+      def gateway_opts
+        opts = {}
+        if config_value(:ssh_gateway)
+          split = config_value(:ssh_gateway).split("@", 2)
+          if split.length == 1
+            gw_host = split[0]
+          else
+            gw_user = split[0]
+            gw_host = split[1]
+          end
+          gw_host, gw_port = gw_host.split(":", 2)
+          # TODO - validate convertable port in config validation?
+          gw_port = Integer(gw_port) rescue nil
+          opts[:bastion_host] = gw_host
+          opts[:bastion_user] = gw_user
+          opts[:bastion_port] = gw_port
+        end
+        opts
+      end
+
+
+      # use_sudo - tells bootstrap to use the sudo command to run bootstrap
+      # use_sudo_password - tells bootstrap to use the sudo command to run bootstrap
+      #                     and to use the password specified with --password
+      # TODO: I'd like to make our sudo options sane:
+      # --sudo (bool) - use sudo
+      # --sudo-password PASSWORD (default:  :password) - use this password for sudo
+      # --sudo-options "opt,opt,opt" to pass into sudo
+      # --sudo-command COMMAND sudo command other than sudo
+      def sudo_opts
+        return {} if connection_protocol == "winrm"
+        opts = { sudo: false }
+        # TODO - do we support :use_sudo in knife config?
+        if config[:use_sudo]
+          opts[:sudo] = true
+          if config[:use_sudo_password]
+            opts[:sudo_password] = config[:password]
+          end
+          if config[:preserve_home]
+             opts[:sudo_options] = "-H"
+          end
+        end
+        opts
+      end
+
+      def winrm_opts
+        return {} unless connection_protocol == "winrm"
+        auth_method = config_value(:winrm_auth_method, :winrm_auth_method, "negotiate")
+        opts = {
+          winrm_transport: auth_method, # winrm gem and train calls auth method 'transport'
+          winrm_basic_auth_only: config_value(:winrm_basic_auth_only),
+          ssl: config_value(:winrm_ssl) === true,
+          ssl_peer_fingerprint: config_value(:winrm_ssl_peer_fingerprint)
+        }
+
+        if auth_method == "kerberos"
+          opts[:kerberos_service] = config_value(:kerberos_service)
+          opts[:kerberos_realm] = config_value(:kerberos_realm)
+        end
+
+        if config_value(:ca_trust_path)
+          opts[:ca_trust_file] = config_value(:ca_trust_path)
+        end
+
+        opts
+      end
+
+
+      # Config overrides to force password auth.
+      def force_ssh_password_opts(password)
+        {
+          password: password,
+          non_interactive: false,
+          keys_only: false,
+          key_files: [],
+          auth_methods: [:password, :keyboard_interactive]
+        }
+      end
+
+      # Looks up configuration entries, first in the class member
+      # `config` which contains options populated from CLI flags.
+      # If the entry is not found there, Chef::Config[:knife][KEY]
+      # is checked.
+      #
+      # fallback_key should be specified if the knife config lookup
+      # key is different from the CLI flag lookup key.
+      #
+      def config_value(key, fallback_key = nil, default = nil)
+        if config.key? key
+          config[key]
+        else
+          lookup_key = fallback_key || key
+          if Chef::Config[:knife].key?(lookup_key)
+            Chef::Config[:knife][lookup_key]
+          else
+            default
+          end
+        end
+      end
+
+      def upload_bootstrap(content)
         script_name = target_host.base_os == :windows ? "bootstrap.bat" : "bootstrap.sh"
         remote_path = target_host.normalize_path(File.join(target_host.temp_dir, script_name))
         target_host.save_as_remote_file(content, remote_path)
@@ -399,7 +572,6 @@ class Chef
       def incomplete_policyfile_options?
         (!!config[:policy_name] ^ config[:policy_group])
       end
-
     end
   end
 end
