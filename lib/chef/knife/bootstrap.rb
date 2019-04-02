@@ -380,10 +380,10 @@ class Chef
 
       # Common configuration for all protocols
       def base_opts
-        port_fallback = "#{connection_protocol}_port".to_sym
-        user_fallback = "#{connection_protocol}_user".to_sym
-        port = config_value(:port, port_fallback)
-        user = config_value(:user, user_fallback)
+        port_knife_key = "#{connection_protocol}_port".to_sym
+        user_knife_key = "#{connection_protocol}_user".to_sym
+        port = config_value(:port, port_knife_key)
+        user = config_value(:user, user_knife_key)
         {}.tap do |opts|
           opts[:logger] = Chef::Log
           opts[:password] = config[:password] if config.key?(:password)
@@ -399,18 +399,18 @@ class Chef
         when "ssh"
           # TODO deprecate host_key_verify in knife config, replace with ssh_verify_host_key
           { verify_host_key: config_value(:ssh_verify_host_key,
-                                          :host_key_verify, nil) === true }
+                                          :host_key_verify, true) === true }
         else
           {}
         end
       end
+
       def ssh_opts
         opts = {}
         return opts if connection_protocol == "winrm"
-
+        opts[:forward_agent] = (config_value(:ssh_forward_agent) === true)
         opts
       end
-
 
       def ssh_identity_opts
         opts = {}
@@ -519,14 +519,14 @@ class Chef
       # If the entry is not found there, Chef::Config[:knife][KEY]
       # is checked.
       #
-      # fallback_key should be specified if the knife config lookup
+      # knife_config_key should be specified if the knife config lookup
       # key is different from the CLI flag lookup key.
       #
-      def config_value(key, fallback_key = nil, default = nil)
+      def config_value(key, knife_config_key = nil, default = nil)
         if config.key? key
           config[key]
         else
-          lookup_key = fallback_key || key
+          lookup_key = knife_config_key || key
           if Chef::Config[:knife].key?(lookup_key)
             Chef::Config[:knife][lookup_key]
           else
@@ -549,7 +549,7 @@ class Chef
         if target_host.base_os == :windows
           "cmd.exe /C #{remote_path}"
         else
-          "sh #{remote_path} "
+          "sh #{remote_path}"
         end
       end
 

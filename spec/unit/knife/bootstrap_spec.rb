@@ -719,12 +719,8 @@ describe Chef::Knife::Bootstrap do
     end
   end
 
-  describe "#connection_opts [to create connection configuration]" do
+  describe "#connection_opts" do
     context "validating use_sudo_password" do
-      before do
-        knife.config[:ssh_password] = "password"
-      end
-
       it "use_sudo_password contains description and long params for help" do
         expect(knife.options).to(have_key(:use_sudo_password)) \
           && expect(knife.options[:use_sudo_password][:description].to_s).not_to(eq(""))\
@@ -737,15 +733,13 @@ describe Chef::Knife::Bootstrap do
   context "#connection_opts" do
     before :each do
       # TODO UNTESTED:
-      # Chef::Config[:knife][:ssh_forward_agent] = true
       # Chef::Config[:knife][:max_wait_seconds_until_ready] = 100
-
-
     end
 
     let(:expected_connection_opts) {
       { base_opts: true,
         ssh_identity_opts: true,
+        ssh_opts: true,
         gateway_opts: true,
         host_verify_opts: true,
         sudo_opts: true,
@@ -758,6 +752,7 @@ describe Chef::Knife::Bootstrap do
       expect(knife).to receive(:gateway_opts).and_return({ gateway_opts: true })
       expect(knife).to receive(:sudo_opts).and_return({ sudo_opts: true })
       expect(knife).to receive(:winrm_opts).and_return({ winrm_opts: true })
+      expect(knife).to receive(:ssh_opts).and_return({ ssh_opts: true })
       expect(knife).to receive(:ssh_identity_opts).and_return({ ssh_identity_opts: true })
       expect(knife.connection_opts).to match expected_connection_opts
     end
@@ -778,7 +773,6 @@ describe Chef::Knife::Bootstrap do
         knife.base_opts
       end
     end
-
 
     context "for all protocols" do
       context "when password is provided" do
@@ -1047,6 +1041,38 @@ describe Chef::Knife::Bootstrap do
           end
         end
       end
+  end
+
+  context "#ssh_opts" do
+    let(:connection_protocol) { nil }
+    before do
+      allow(knife).to receive(:connection_protocol).and_return connection_protocol
+    end
+
+    context "for ssh" do
+      let(:connection_protocol) { "ssh" }
+      context "when ssh_forward_agent has a value" do
+        before do
+          knife.config[:ssh_forward_agent] = true
+        end
+        it "returns a configuration hash with forward_agent set to true" do
+          expect(knife.ssh_opts).to eq({ forward_agent: true })
+        end
+      end
+      context "when ssh_forward_agent is not set" do
+        it "returns a configuration hash with forward_agent set to false" do
+          expect(knife.ssh_opts).to eq({ forward_agent: false })
+        end
+      end
+    end
+
+    context "for winrm" do
+      let(:connection_protocol) { "winrm" }
+      it "returns an empty has because ssh is not winrm" do
+        expect(knife.ssh_opts).to eq({})
+      end
+    end
+
   end
 
   context "#winrm_opts" do
@@ -1379,6 +1405,94 @@ describe Chef::Knife::Bootstrap do
     end
   end
 
+  describe "#config_value" do
+    before do
+      knife.config[:test_key_a] = "a from cli"
+      knife.config[:test_key_b] = "b from cli"
+      Chef::Config[:knife][:test_key_a] = "a from Chef::Config"
+      Chef::Config[:knife][:test_key_c] = "c from Chef::Config"
+      Chef::Config[:knife][:alt_test_key_c] = "alt c from Chef::Config"
+    end
+
+    it "returns CLI value when key is only provided by the CLI" do
+      expect(knife.config_value(:test_key_b)).to eq "b from cli"
+    end
+
+    it "returns CLI value when key is provided by CLI and Chef::Config" do
+      expect(knife.config_value(:test_key_a)).to eq "a from cli"
+    end
+
+    it "returns Chef::Config value whent he key is only provided by Chef::Config" do
+      expect(knife.config_value(:test_key_c)).to eq "c from Chef::Config"
+    end
+
+    it "returns the Chef::Config value from the alternate key when the CLI key is not set" do
+      expect(knife.config_value(:test_key_c, :alt_test_key_c)).to eq "alt c from Chef::Config"
+    end
+
+    it "returns the default value when the key is not provided by CLI or Chef::Config" do
+      expect(knife.config_value(:missing_key, :missing_key, "found")).to eq "found"
+    end
+  end
+
+  describe "#upload_bootstrap" do
+    before do
+     allow(target_host).to receive(:temp_dir).and_return(temp_dir)
+     allow(target_host).to receive(:normalize_path) { |a| a }
+    end
+
+    let(:content) { "bootstrap script content" }
+    context "under Windows" do
+      let(:base_os) { :windows }
+      let(:temp_dir) { "C:/Temp/bootstrap" }
+      it "creates a bat file in the temp dir provided by target_host, using given content" do
+        expect(target_host).to receive(:save_as_remote_file).with(content, "C:/Temp/bootstrap/bootstrap.bat")
+        expect(knife.upload_bootstrap(content)).to eq "C:/Temp/bootstrap/bootstrap.bat"
+      end
+    end
+
+    context "under Linux" do
+      let(:base_os) { :linux }
+      let(:temp_dir) { "/tmp/bootstrap" }
+      it "creates a 'sh file in the temp dir provided by target_host, using given content" do
+        expect(target_host).to receive(:save_as_remote_file).with(content, "/tmp/bootstrap/bootstrap.sh")
+        expect(knife.upload_bootstrap(content)).to eq "/tmp/bootstrap/bootstrap.sh"
+      end
+    end
+  end
+
+  describe "#bootstrap_command" do
+    context "under Windows" do
+      let(:base_os) { :windows }
+      it "prefixes the command to run under cmd.exe" do
+        expect(knife.bootstrap_command("autoexec.bat")).to eq "cmd.exe /C autoexec.bat"
+      end
+
+    end
+    context "under Linux" do
+      let(:base_os) { :linux }
+      it "prefixes the command to run under sh" do
+        expect(knife.bootstrap_command("bootstrap")).to eq "sh bootstrap"
+      end
+    end
+  end
+
+
+  describe "#default_bootstrap_template" do
+    context "under Windows" do
+      let(:base_os) { :windows }
+      it "is windows-chef-client-msi" do
+        expect(knife.default_bootstrap_template).to eq "windows-chef-client-msi"
+      end
+
+    end
+    context "under Linux" do
+      let(:base_os) { :linux }
+      it "is chef-full" do
+        expect(knife.default_bootstrap_template).to eq "chef-full"
+      end
+    end
+  end
 end
 
 
