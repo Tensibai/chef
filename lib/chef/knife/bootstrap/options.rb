@@ -50,23 +50,14 @@ class Chef
             option :protocol,
               short: "-o PROTOCOL",
               long: "--protocol PROTOCOL",
-              description: "The protocol to use to connect to the target node.  Supports ssh and winrm.",
-              default: 'ssh'
+              description: "The protocol to use to connect to the target node.  Supports ssh and winrm."
 
-            # TODO SSH  train gives bastion_host which seeems to map to getway/gateway_identity -
-            # though not exactly.
             option :ssh_gateway,
               short: "-G GATEWAY",
               long: "--ssh-gateway GATEWAY",
               description: "The ssh gateway",
               proc: Proc.new { |key| Chef::Config[:knife][:ssh_gateway] = key }
 
-            # TODO - missing in train: ssh_gateway_identity. But could just append to
-            # keyfiles - train accepts multiple?
-            # TODO - train supports bastion_user and bastion_port
-            # SSH  - this just maps to key_files  - under knife-ssh we would use either this,
-            # _or_ ssh_identity_file
-            #        either this or 'ssh_identity_file' but not both.
             option :ssh_gateway_identity,
               long: "--ssh-gateway-identity SSH_GATEWAY_IDENTITY",
               description: "The SSH identity file used for gateway authentication",
@@ -150,7 +141,7 @@ class Chef
                 description: "Verify the SSL cert for HTTPS requests to the Chef server API.",
                 boolean: true
 
-              # runtime, prefixes to ssh command.  train: [:sudo] - auto prefixes everything
+              # runtime, prefixes to ssh command.
               option :use_sudo,
                 long: "--sudo",
                 description: "Execute the bootstrap via sudo",
@@ -166,6 +157,11 @@ class Chef
               option :use_sudo_password,
                 long: "--use-sudo-password",
                 description: "Execute the bootstrap via sudo with password",
+                boolean: false
+              # runtime - prefixes to ssh command string
+              option :sudo_password,
+                long: "--sudo-password",
+                description: "Use this password for sudo when executing the bootstrap",
                 boolean: false
 
               # runtime - client_builder
@@ -216,6 +212,11 @@ class Chef
                 proc: lambda { |o| Chef::JSONCompat.parse(File.read(o)) },
                 default: nil
 
+              # Note that several of the below options are used by bootstrap template,
+              # but only from the passed-in knife config; it does not use the
+              # config from the CLI for those values.  In those cases, the option
+              # will have a proc that assigns the value into Chef::Config[:knife]
+
               # bootstrap template
               # Create ohai hints in /etc/chef/ohai/hints, fname=hintname, content=value
               option :hint,
@@ -227,152 +228,141 @@ class Chef
                   Chef::Config[:knife][:hints][name] = path ? Chef::JSONCompat.parse(::File.read(path)) : Hash.new
                 }
 
-                # bootstrap override: url of a an installer shell script touse in place of omnitruck
-                option :bootstrap_url,
-                  long: "--bootstrap-url URL",
-                  description: "URL to a custom installation script",
-                  proc: Proc.new { |u| Chef::Config[:knife][:bootstrap_url] = u }
+              # bootstrap override: url of a an installer shell script touse in place of omnitruck
+              # Note that the bootstrap template _only_ references this out of Chef::Config, and not from
+              # the provided options to knife bootstrap, so we set the Chef::Config option here.
+              option :bootstrap_url,
+                long: "--bootstrap-url URL",
+                description: "URL to a custom installation script",
+                proc: Proc.new { |u| Chef::Config[:knife][:bootstrap_url] = u }
 
 
-                # bootstrap override: Do this instead of our own setup.sh from omnitruck. Causes bootstrap_url to be ignored.
-                option :bootstrap_install_command,
-                  long: "--bootstrap-install-command COMMANDS",
-                  description: "Custom command to install chef-client",
-                  proc: Proc.new { |ic| Chef::Config[:knife][:bootstrap_install_command] = ic }
+              # bootstrap override: Do this instead of our own setup.sh from omnitruck. Causes bootstrap_url to be ignored.
+              option :bootstrap_install_command,
+                long: "--bootstrap-install-command COMMANDS",
+                description: "Custom command to install chef-client",
+                proc: Proc.new { |ic| Chef::Config[:knife][:bootstrap_install_command] = ic }
 
-                # bootstrap template: Run this command first in the bootstrap script
-                option :bootstrap_preinstall_command,
-                  long: "--bootstrap-preinstall-command COMMANDS",
-                  description: "Custom commands to run before installing chef-client",
-                  proc: Proc.new { |preic| Chef::Config[:knife][:bootstrap_preinstall_command] = preic }
+              # bootstrap template: Run this command first in the bootstrap script
+              option :bootstrap_preinstall_command,
+                long: "--bootstrap-preinstall-command COMMANDS",
+                description: "Custom commands to run before installing chef-client",
+                proc: Proc.new { |preic| Chef::Config[:knife][:bootstrap_preinstall_command] = preic }
 
-                # bootstrap template
-                option :bootstrap_wget_options,
-                  long: "--bootstrap-wget-options OPTIONS",
-                  description: "Add options to wget when installing chef-client",
-                  proc: Proc.new { |wo| Chef::Config[:knife][:bootstrap_wget_options] = wo }
+              # bootstrap template
+              option :bootstrap_wget_options,
+                long: "--bootstrap-wget-options OPTIONS",
+                description: "Add options to wget when installing chef-client",
+                proc: Proc.new { |wo| Chef::Config[:knife][:bootstrap_wget_options] = wo }
 
-                # bootstrap template
-                option :bootstrap_curl_options,
-                  long: "--bootstrap-curl-options OPTIONS",
-                  description: "Add options to curl when install chef-client",
-                  proc: Proc.new { |co| Chef::Config[:knife][:bootstrap_curl_options] = co }
+              # bootstrap template
+              option :bootstrap_curl_options,
+                long: "--bootstrap-curl-options OPTIONS",
+                description: "Add options to curl when install chef-client",
+                proc: Proc.new { |co| Chef::Config[:knife][:bootstrap_curl_options] = co }
 
-                # chef_vault_handler
-                option :bootstrap_vault_file,
-                  long: "--bootstrap-vault-file VAULT_FILE",
-                  description: "A JSON file with a list of vault(s) and item(s) to be updated"
+              # chef_vault_handler
+              option :bootstrap_vault_file,
+                long: "--bootstrap-vault-file VAULT_FILE",
+                description: "A JSON file with a list of vault(s) and item(s) to be updated"
 
-                # chef_vault_handler
-                option :bootstrap_vault_json,
-                  long: "--bootstrap-vault-json VAULT_JSON",
-                  description: "A JSON string with the vault(s) and item(s) to be updated"
+              # chef_vault_handler
+              option :bootstrap_vault_json,
+                long: "--bootstrap-vault-json VAULT_JSON",
+                description: "A JSON string with the vault(s) and item(s) to be updated"
 
-                # chef_vault_handler
-                option :bootstrap_vault_item,
-                  long: "--bootstrap-vault-item VAULT_ITEM",
-                  description: 'A single vault and item to update as "vault:item"',
-                  proc: Proc.new { |i|
-                    (vault, item) = i.split(/:/)
-                    Chef::Config[:knife][:bootstrap_vault_item] ||= {}
-                    Chef::Config[:knife][:bootstrap_vault_item][vault] ||= []
-                    Chef::Config[:knife][:bootstrap_vault_item][vault].push(item)
-                    Chef::Config[:knife][:bootstrap_vault_item]
-                  }
+              # chef_vault_handler
+              option :bootstrap_vault_item,
+                long: "--bootstrap-vault-item VAULT_ITEM",
+                description: 'A single vault and item to update as "vault:item"',
+                proc: Proc.new { |i|
+                  (vault, item) = i.split(/:/)
+                  Chef::Config[:knife][:bootstrap_vault_item] ||= {}
+                  Chef::Config[:knife][:bootstrap_vault_item][vault] ||= []
+                  Chef::Config[:knife][:bootstrap_vault_item][vault].push(item)
+                  Chef::Config[:knife][:bootstrap_vault_item]
+                }
 
-                  # Windows only
-
-
-                  # bootstrap template
-                  option :install_as_service,
-                    :long => "--install-as-service",
-                    :description => "Install chef-client as a Windows service. (Windows only)",
-                    :default => false
-
-                  option :msi_url,
-                    :short => "-u URL",
-                    :long => "--msi-url URL",
-                    :description => "Location of the Chef Client MSI. The default templates will prefer to download from this location. The MSI will be downloaded from chef.io if not provided (windows).",
-                    :default => ''
-
-                  # TODO - may not need, current method works in powershell
-                  # option :winrm_codepage,
-                  #   :long => "--winrm-codepage Codepage",
-                  #   :description => "The codepage to use for the winrm cmd shell",
-                  #   :default => 65001
-
-                  # TODO - bootstrap
-                  option :winrm_ssl_peer_fingerprint,
-                    :long => "--winrm-ssl-peer-fingerprint FINGERPRINT",
-                    :description => "ssl Cert Fingerprint to bypass normal cert chain checks"
-
-                  # NOTE:removed.  winrm_port -> port
-                  # option :winrm_port,
-
-                  # NOTE: removed; was in general options for winrm,
-                  # but bootstrap previously only supported :cmd;
-                  # under train it supports only :powershell
-
-                  # option :winrm_shell
-
-                  # TODO - need to understand when this is relevant. Was not exposed
-                  #        in knife windows, but is exposed in train.
-                  # option :winrm_basic_auth_only,
-                  #   long: "--winrm-basic-auth-only",
-                  #   description: "Force Basic authentication for WinRM",
-                  #   default: false
-
-                  option :ca_trust_path,
-                    :short => "-f CA_TRUST_PATH",
-                    :long => "--ca-trust-file CA_TRUST_PATH",
-                    :description => "The Certificate Authority (CA) trust file used for SSL transport"
-
-                  option :winrm_no_verify_cert,
-                    long: "--winrm-no-verify-cert",
-                    description: "Do not verify the SSL certificate of the target node for WinRM. Defaults to true.",
-                    default: false
+                # Windows only
 
 
-                  option :winrm_ssl,
-                    long: "--winrm-ssl",
-                    description: "Connect to WinRM using SSL",
-                    boolean: true
+              # bootstrap template
+              option :install_as_service,
+                :long => "--install-as-service",
+                :description => "Install chef-client as a Windows service. (Windows only)",
+                :default => false
 
-                  option :winrm_auth_method,
-                    :short => "-w AUTH-METHOD",
-                    :long => "--winrm-auth-method AUTH-METHOD",
-                    :description => "The WinRM authentication method to use. Valid choices are #{WINRM_AUTH_PROTOCOL_LIST}",
-                    :default => "negotiate"
+              option :msi_url,
+                :short => "-u URL",
+                :long => "--msi-url URL",
+                :description => "Location of the Chef Client MSI. The default templates will prefer to download from this location. The MSI will be downloaded from chef.io if not provided (windows).",
+                :default => ''
 
-                  option :winrm_basic_auth_only,
-                    long: "--winrm-basic-auth-only",
-                    description: "For WinRM basic authentication when using the 'ssl' auth method",
-                    default: false,
-                    boolean: true
+              # bootstrap
+              option :winrm_ssl_peer_fingerprint,
+                :long => "--winrm-ssl-peer-fingerprint FINGERPRINT",
+                :description => "ssl Cert Fingerprint to bypass normal cert chain checks"
 
-                  # This option was provided in knife bootstrap windows winrm,
-                  # but it is ignored  in knife-windows/WinrmSession.
-                  # option :kerberos_keytab_file,
-                  #   :short => "-T KEYTAB_FILE",
-                  #   :long => "--keytab-file KEYTAB_FILE",
-                  #   :description => "The Kerberos keytab file used for authentication",
-                  #   :proc => Proc.new { |keytab| Chef::Config[:knife][:kerberos_keytab_file] = keytab }
+              # NOTE:removed.  winrm_port -> port
+              # option :winrm_port,
 
-                  option :kerberos_realm,
-                    :short => "-R KERBEROS_REALM",
-                    :long => "--kerberos-realm KERBEROS_REALM",
-                    :description => "The Kerberos realm used for authentication"
+              # NOTE: removed; was in general options for winrm,
+              # but bootstrap previously only supported :cmd;
+              # under train it supports only :powershell
+              # option :winrm_shell
 
-                  option :kerberos_service,
-                    :short => "-S KERBEROS_SERVICE",
-                    :long => "--kerberos-service KERBEROS_SERVICE",
-                    :description => "The Kerberos service used for authentication"
 
-                    # TODO
-                  option :session_timeout,
-                    :long => "--session-timeout Minutes",
-                    :description => "The timeout for the client for the maximum length of the WinRM session",
-                    :default => 30
+              option :ca_trust_path,
+                :short => "-f CA_TRUST_PATH",
+                :long => "--ca-trust-file CA_TRUST_PATH",
+                :description => "The Certificate Authority (CA) trust file used for SSL transport"
+
+              option :winrm_no_verify_cert,
+                long: "--winrm-no-verify-cert",
+                description: "Do not verify the SSL certificate of the target node for WinRM. Defaults to true.",
+                default: false
+
+
+              option :winrm_ssl,
+                long: "--winrm-ssl",
+                description: "Connect to WinRM using SSL",
+                boolean: true
+
+              option :winrm_auth_method,
+                :short => "-w AUTH-METHOD",
+                :long => "--winrm-auth-method AUTH-METHOD",
+                :description => "The WinRM authentication method to use. Valid choices are #{WINRM_AUTH_PROTOCOL_LIST}",
+                :default => "negotiate"
+
+              option :winrm_basic_auth_only,
+                long: "--winrm-basic-auth-only",
+                description: "For WinRM basic authentication when using the 'ssl' auth method",
+                default: false,
+                boolean: true
+
+              # This option was provided in knife bootstrap windows winrm,
+              # but it is ignored  in knife-windows/WinrmSession.
+              # option :kerberos_keytab_file,
+              #   :short => "-T KEYTAB_FILE",
+              #   :long => "--keytab-file KEYTAB_FILE",
+              #   :description => "The Kerberos keytab file used for authentication",
+              #   :proc => Proc.new { |keytab| Chef::Config[:knife][:kerberos_keytab_file] = keytab }
+
+              option :kerberos_realm,
+                :short => "-R KERBEROS_REALM",
+                :long => "--kerberos-realm KERBEROS_REALM",
+                :description => "The Kerberos realm used for authentication"
+
+              option :kerberos_service,
+                :short => "-S KERBEROS_SERVICE",
+                :long => "--kerberos-service KERBEROS_SERVICE",
+                :description => "The Kerberos service used for authentication"
+
+              # TODO - track this down, we have another timeout - merge?
+              option :session_timeout,
+                :long => "--session-timeout Minutes",
+                :description => "The timeout for the client for the maximum length of the WinRM session",
+                :default => 30
 
           end
         end
