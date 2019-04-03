@@ -24,33 +24,38 @@ class Chef
         # TODO - we don't actually validate that the protocol is valid...
         WINRM_AUTH_PROTOCOL_LIST = %w{plaintext kerberos ssl negotiate}
 
+        #TODO - missing - authtimeout (minutes)
+        #TODO - missing impl - session-timeout minutes
         def self.included(includer)
           includer.class_eval do
+
             # Common connectivity options
-            # TODO - renamed --ssh-user -> --ssh-password
-            option :user,  # TODO - deprecate ssh_user which this replaces
-              short: "-u USERNAME",
-              long: "--user USERNAME",
-              description: "The remote user to connect as"
+            option :connection_user,
+              short: "-U USERNAME",
+              long: "--connection-user USERNAME",
+              description: "Authenticate to the target host with this user account"
 
-            # TODO - renamed --ssh-password -> --password
-            option :password, # TODO - deprecate ssh_password
+            option :password,
               short: "-P PASSWORD",
-              long: "--ssh-password PASSWORD",
-              description: "The password of the remote user."
+              long: "--connection-password PASSWORD",
+              description: "Authenticate to the target host with this password"
 
-            # TODO - renamed --ssh-port -> --port
-            option :port,
+            option :connection_port,
               short: "-p PORT",
-              long: "--ssh-port PORT",
-              description: "The port on the target node to connect to.",
+              long: "--connection-port PORT",
+              description: "The port on the target node to connect to."
 
-              proc: Proc.new { |key| Chef::Config[:knife][:ssh_port] = key }
-
-            option :protocol,
+            option :connection_protocol,
               short: "-o PROTOCOL",
-              long: "--protocol PROTOCOL",
+              long: "--connection-protocol PROTOCOL",
               description: "The protocol to use to connect to the target node.  Supports ssh and winrm."
+
+            option :max_wait,
+              short: "-W SECONDS",
+              long: "--max-wait SECONDS",
+              description: "The maximum time to wait for the initial connection to be established."
+
+            ## SSH options
 
             option :ssh_gateway,
               short: "-G GATEWAY",
@@ -64,7 +69,6 @@ class Chef
               proc: Proc.new { |key| Chef::Config[:knife][:ssh_gateway_identity] = key }
 
             # SSH train ssh: options[:forward_agent]
-            # TODO: renamed to ssh_forward_agent from forward_agent for consistency.
             option :ssh_forward_agent,
               short: "-A",
               long: "--ssh-forward-agent",
@@ -141,27 +145,22 @@ class Chef
                 description: "Verify the SSL cert for HTTPS requests to the Chef server API.",
                 boolean: true
 
-              # runtime, prefixes to ssh command.
+              # runtime - sudo settings (train handles sudo)
               option :use_sudo,
                 long: "--sudo",
                 description: "Execute the bootstrap via sudo",
                 boolean: true
 
-              # runtime - prefixes to ssh command string
+              # runtime - sudo settings (train handles sudo)
               option :preserve_home,
                 long: "--sudo-preserve-home",
                 description: "Preserve non-root user HOME environment variable with sudo",
                 boolean: true
 
-              # runtime - prefixes to ssh command string
+              # runtime - sudo settings (train handles sudo)
               option :use_sudo_password,
                 long: "--use-sudo-password",
                 description: "Execute the bootstrap via sudo with password",
-                boolean: false
-              # runtime - prefixes to ssh command string
-              option :sudo_password,
-                long: "--sudo-password",
-                description: "Use this password for sudo when executing the bootstrap",
                 boolean: false
 
               # runtime - client_builder
@@ -283,8 +282,7 @@ class Chef
                   Chef::Config[:knife][:bootstrap_vault_item]
                 }
 
-                # Windows only
-
+              # Windows only
 
               # bootstrap template
               option :install_as_service,
@@ -292,27 +290,18 @@ class Chef
                 :description => "Install chef-client as a Windows service. (Windows only)",
                 :default => false
 
+              # bootstrap template
               option :msi_url,
-                :short => "-u URL",
+                :short => "-m URL",
                 :long => "--msi-url URL",
                 :description => "Location of the Chef Client MSI. The default templates will prefer to download from this location. The MSI will be downloaded from chef.io if not provided (windows).",
                 :default => ''
 
-              # bootstrap
               option :winrm_ssl_peer_fingerprint,
                 :long => "--winrm-ssl-peer-fingerprint FINGERPRINT",
-                :description => "ssl Cert Fingerprint to bypass normal cert chain checks"
+                :description => "SSL certificate fingerprint expected from the target."
 
-              # NOTE:removed.  winrm_port -> port
-              # option :winrm_port,
-
-              # NOTE: removed; was in general options for winrm,
-              # but bootstrap previously only supported :cmd;
-              # under train it supports only :powershell
-              # option :winrm_shell
-
-
-              option :ca_trust_path,
+              option :ca_trust_file,
                 :short => "-f CA_TRUST_PATH",
                 :long => "--ca-trust-file CA_TRUST_PATH",
                 :description => "The Certificate Authority (CA) trust file used for SSL transport"
@@ -332,7 +321,8 @@ class Chef
                 :short => "-w AUTH-METHOD",
                 :long => "--winrm-auth-method AUTH-METHOD",
                 :description => "The WinRM authentication method to use. Valid choices are #{WINRM_AUTH_PROTOCOL_LIST}",
-                :default => "negotiate"
+                :default => "negotiate",
+                :proc => Proc.new { |protocol| Chef::Config[:knife][:winrm_auth_method] = protocol }
 
               option :winrm_basic_auth_only,
                 long: "--winrm-basic-auth-only",
@@ -341,7 +331,7 @@ class Chef
                 boolean: true
 
               # This option was provided in knife bootstrap windows winrm,
-              # but it is ignored  in knife-windows/WinrmSession.
+              # but it is ignored  in knife-windows/WinrmSession, and so remains unimplemeneted here.
               # option :kerberos_keytab_file,
               #   :short => "-T KEYTAB_FILE",
               #   :long => "--keytab-file KEYTAB_FILE",
@@ -351,18 +341,20 @@ class Chef
               option :kerberos_realm,
                 :short => "-R KERBEROS_REALM",
                 :long => "--kerberos-realm KERBEROS_REALM",
-                :description => "The Kerberos realm used for authentication"
+                :description => "The Kerberos realm used for authentication",
+                :proc => Proc.new { |protocol| Chef::Config[:knife][:kerberos_realm] = protocol }
 
               option :kerberos_service,
                 :short => "-S KERBEROS_SERVICE",
                 :long => "--kerberos-service KERBEROS_SERVICE",
-                :description => "The Kerberos service used for authentication"
+                :description => "The Kerberos service used for authentication",
+                :proc => Proc.new { |protocol| Chef::Config[:knife][:kerberos_service] = protocol }
 
-              # TODO - track this down, we have another timeout - merge?
-              option :session_timeout,
-                :long => "--session-timeout Minutes",
-                :description => "The timeout for the client for the maximum length of the WinRM session",
-                :default => 30
+              option :winrm_session_timeout,
+                :long => "--winrm-session-timeout SECONDS",
+                :description => "The number of seconds to wait for each WinRM operation to be acknowledged while running bootstrap",
+                :default => 30,
+                :proc => Proc.new { |protocol| Chef::Config[:knife][:winrm_session_timeout] = protocol }
 
           end
         end

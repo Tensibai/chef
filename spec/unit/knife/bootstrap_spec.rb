@@ -551,12 +551,12 @@ describe Chef::Knife::Bootstrap do
   describe "#connection_protocol" do
     let(:host_descriptor) { "example.com" }
     let(:config) { { } }
-    let(:knife_bootstrap_protocol) { nil }
+    let(:knife_connection_protocol) { nil }
     before do
       allow(knife).to receive(:config).and_return config
       allow(knife).to receive(:host_descriptor).and_return host_descriptor
-      if knife_bootstrap_protocol
-        Chef::Config[:knife][:bootstrap_protocol] = knife_bootstrap_protocol
+      if knife_connection_protocol
+        Chef::Config[:knife][:connection_protocol] = knife_connection_protocol
       end
     end
 
@@ -569,7 +569,7 @@ describe Chef::Knife::Bootstrap do
     end
 
     context "when protocol is provided via the CLI flag" do
-      let(:config) { { protocol: "winrm" } }
+      let(:config) { { connection_protocol: "winrm" } }
       it "returns that value" do
         expect(knife.connection_protocol).to eq "winrm"
       end
@@ -578,7 +578,7 @@ describe Chef::Knife::Bootstrap do
     end
     context "when protocol is provided via the host argument and the CLI flag"  do
       let(:host_descriptor) { "ssh://example.com" }
-      let(:config) { { protocol: "winrm" } }
+      let(:config) { { connection_protocol: "winrm" } }
 
       it "returns the value provided by the host argument" do
         expect(knife.connection_protocol).to eq "ssh"
@@ -588,12 +588,12 @@ describe Chef::Knife::Bootstrap do
     context "when no explicit protocol is provided" do
       let(:config) { {} }
       let(:host_descriptor) { "example.com" }
-      let(:knife_bootstrap_protocol) { "winrm" }
+      let(:knife_connection_protocol) { "winrm" }
       it "falls back to knife config" do
         expect(knife.connection_protocol).to eq "winrm"
       end
       context "and there is no knife bootstrap_protocol" do
-        let(:knife_bootstrap_protocol) { nil }
+        let(:knife_connection_protocol) { nil }
         it "falls back to 'ssh'" do
           expect(knife.connection_protocol).to eq "ssh"
         end
@@ -616,7 +616,7 @@ describe Chef::Knife::Bootstrap do
 
       context "and they do not match" do
         let(:connection_protocol) { "ssh" }
-        let(:config) { { protocol: "winrm" } }
+        let(:config) { { connection_protocol: "winrm" } }
         it "outputs an error and exits" do
           expect(knife.ui).to receive(:error)
           expect{ knife.validate_protocol! }.to raise_error SystemExit
@@ -625,7 +625,7 @@ describe Chef::Knife::Bootstrap do
 
       context "and they do match" do
         let(:connection_protocol) { "winrm" }
-        let(:config) { { protocol: "winrm" } }
+        let(:config) { { connection_protocol: "winrm" } }
         it "returns true" do
           expect(knife.validate_protocol!).to eq true
         end
@@ -719,16 +719,18 @@ describe Chef::Knife::Bootstrap do
     end
   end
 
-  describe "#connection_opts" do
-    context "validating use_sudo_password" do
-      it "use_sudo_password contains description and long params for help" do
-        expect(knife.options).to(have_key(:use_sudo_password)) \
-          && expect(knife.options[:use_sudo_password][:description].to_s).not_to(eq(""))\
-          && expect(knife.options[:use_sudo_password][:long].to_s).not_to(eq(""))
-      end
+  # TODO - this is the only cli option we validate the _option_ itself -
+  #        so we'll know if someone accidentally deletes or renames use_sudo_password
+  #        Is this worht keeping?  If so, then it seems we should expand it
+  #        to cover all options.
+  context "validating use_sudo_password option" do
+    it "use_sudo_password contains description and long params for help" do
+      expect(knife.options).to(have_key(:use_sudo_password)) \
+        && expect(knife.options[:use_sudo_password][:description].to_s).not_to(eq(""))\
+        && expect(knife.options[:use_sudo_password][:long].to_s).not_to(eq(""))
     end
-
   end
+
 
   context "#connection_opts" do
     before :each do
@@ -768,8 +770,10 @@ describe Chef::Knife::Bootstrap do
     context "when determining knife config keys for user and port" do
       let(:connection_protocol) { "fake" }
       it "uses the protocol name to resolve the knife config keys" do
-        expect(knife).to receive(:config_value).with(:user, :fake_user)
-        expect(knife).to receive(:config_value).with(:port, :fake_port)
+        allow(knife).to receive(:config_value).with(:max_wait)
+
+        expect(knife).to receive(:config_value).with(:connection_port, :fake_port)
+        expect(knife).to receive(:config_value).with(:connection_user, :fake_user)
         knife.base_opts
       end
     end
@@ -777,8 +781,8 @@ describe Chef::Knife::Bootstrap do
     context "for all protocols" do
       context "when password is provided" do
         before do
-          knife.config[:port] = 250
-          knife.config[:user] = "test"
+          knife.config[:connection_port] = 250
+          knife.config[:connection_user] = "test"
           knife.config[:password] = "opscode"
         end
 
@@ -795,10 +799,11 @@ describe Chef::Knife::Bootstrap do
         end
 
       end
+
       context "when password is not provided" do
         before do
-          knife.config[:port] = 250
-          knife.config[:user] = "test"
+          knife.config[:connection_port] = 250
+          knife.config[:connection_user] = "test"
         end
 
         let(:expected_opts) {
@@ -865,7 +870,7 @@ describe Chef::Knife::Bootstrap do
         end
         it "generates the expected configuration" do
           expect(knife.ssh_identity_opts).to eq({
-              identity_files: [ "/identity.pem" ],
+              key_files: [ "/identity.pem" ],
               keys_only: true
             })
         end
@@ -877,7 +882,7 @@ describe Chef::Knife::Bootstrap do
 
           it "generates the expected configuration (both keys, keys_only true)" do
             expect(knife.ssh_identity_opts).to eq({
-              identity_files: [ "/identity.pem", "/gateway.pem" ],
+              key_files: [ "/identity.pem", "/gateway.pem" ],
               keys_only: true
             })
           end
@@ -887,7 +892,7 @@ describe Chef::Knife::Bootstrap do
       context "when no identity file is specified" do
         it "generates the expected configuration (no keys, keys_only false)" do
           expect(knife.ssh_identity_opts).to eq( {
-            identity_files: [ ],
+            key_files: [ ],
             keys_only: false
           })
         end
@@ -897,7 +902,7 @@ describe Chef::Knife::Bootstrap do
           end
           it "generates the expected configuration (gateway key, keys_only false)" do
             expect(knife.ssh_identity_opts).to eq({
-              identity_files: [ "/gateway.pem" ],
+              key_files: [ "/gateway.pem" ],
               keys_only: false
             })
           end
@@ -1014,7 +1019,6 @@ describe Chef::Knife::Bootstrap do
               sudo_password: "opscode"
             })
           end
-
         end
 
         context "when preserve_home is set" do
@@ -1087,7 +1091,8 @@ describe Chef::Knife::Bootstrap do
         winrm_transport: "negotiate",
         winrm_basic_auth_only: false,
         ssl: false,
-        ssl_peer_fingerprint: nil
+        ssl_peer_fingerprint: nil,
+        operation_timeout: 30,
       }}
 
       it "generates a correct configuration hash with expected defaults" do
@@ -1135,12 +1140,12 @@ describe Chef::Knife::Bootstrap do
         end
       end
 
-      context "with ca_trust_path" do
+      context "with ca_trust_file" do
         let(:ca_trust_expected) {
           expected.merge({ ca_trust_file: "/trust.me"})
         }
         before do
-          knife.config[:ca_trust_path] = "/trust.me"
+          knife.config[:ca_trust_file] = "/trust.me"
         end
 
         it "generates a correct options hash with ca_trust_file from the config provided" do

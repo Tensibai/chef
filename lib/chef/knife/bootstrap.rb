@@ -50,7 +50,6 @@ class Chef
 
       def initialize(argv = [])
         super
-        # TODO - these map cleanly to action support classes
         @client_builder = Chef::Knife::Bootstrap::ClientBuilder.new(
           chef_config: Chef::Config,
           knife_config: config,
@@ -255,8 +254,8 @@ class Chef
       def connection_protocol
         return @connection_protocol if @connection_protocol
         from_url = host_descriptor  =~ /^(.*):\/\// ? $1 : nil
-        from_cli = config[:protocol]
-        from_knife = Chef::Config[:knife][:bootstrap_protocol]
+        from_cli = config[:connection_protocol]
+        from_knife = Chef::Config[:knife][:connection_protocol]
         @connection_protocol = from_url || from_cli || from_knife || "ssh"
       end
 
@@ -338,7 +337,7 @@ class Chef
       #
       # @return [TrueClass] If options are valid.
       def validate_protocol!
-        from_cli = config[:protocol]
+        from_cli = config[:connection_protocol]
         if (from_cli && connection_protocol != from_cli)
           # Hanging indent to align with the ERROR: prefix
           ui.error <<~EOM
@@ -380,14 +379,18 @@ class Chef
 
       # Common configuration for all protocols
       def base_opts
-        port_knife_key = "#{connection_protocol}_port".to_sym
-        user_knife_key = "#{connection_protocol}_user".to_sym
-        port = config_value(:port, port_knife_key)
-        user = config_value(:user, user_knife_key)
+        #
+        port = config_value(:connection_port,
+                            knife_key_for_protocol(connection_protocol, :port))
+        user = config_value(:connection_user,
+                            knife_key_for_protocol(connection_protocol, :user))
         {}.tap do |opts|
           opts[:logger] = Chef::Log
+          # We do not store password in Chef::Config, so only use CLI `config` here
           opts[:password] = config[:password] if config.key?(:password)
           opts[:user] = user if user
+          opts[:max_wait_until_ready] = config_value(:max_wait) unless config_value(:max_wait).nil?
+          # TODO rdp_port for RDP. port for ssh.
           opts[:port] = port if port
         end
       end
@@ -417,19 +420,19 @@ class Chef
         return opts if connection_protocol == "winrm"
         identity_file = config_value(:ssh_identity_file)
         if identity_file
-          opts[:identity_files] = [identity_file]
+          opts[:key_files] = [identity_file]
           # We only set keys_only based on the explicit ssh_identity_file;
           # someone may use a gateway key and still expect password auth
           # on the target.
           opts[:keys_only] = true
         else
-          opts[:identity_files] = []
+          opts[:key_files] = []
           opts[:keys_only] = false
         end
 
         gateway_identity_file = config_value(:ssh_gateway_identity)
         unless gateway_identity_file.nil?
-          opts[:identity_files] << gateway_identity_file
+          opts[:key_files] << gateway_identity_file
         end
 
         opts
@@ -495,9 +498,11 @@ class Chef
           opts[:kerberos_realm] = config_value(:kerberos_realm)
         end
 
-        if config_value(:ca_trust_path)
-          opts[:ca_trust_file] = config_value(:ca_trust_path)
+        if config_value(:ca_trust_file)
+          opts[:ca_trust_file] = config_value(:ca_trust_file)
         end
+
+        opts[:operation_timeout] = config_value(:winrm_session_timeout)
 
         opts
       end
@@ -551,6 +556,18 @@ class Chef
         else
           "sh #{remote_path}"
         end
+      end
+
+
+      # To avoid cluttering the CLI options, some flags (such as port and user)
+      # are shared between protocols.  However, there is still a need to allow the operator
+      # to specify defaults separately, since they may not be the same values for different protocols.
+      #
+      # These keys are available in Chef::Config, and are prefixed with the protocol name.
+      # For example, :user CLI option will map to :winrm_user and :ssh_user Chef::Config keys,
+      # based on the connection protocol in use.
+      def knife_key_for_protocol(protocol, option)
+        "#{connection_protocol}_#{option.to_s}".to_sym
       end
 
       private
