@@ -85,8 +85,7 @@ class Chef
             option :ssh_verify_host_key,
               long: "--ssh-[no-]verify-host-key",
               description: "Verify host key, enabled by default.",
-              boolean: true,
-              default: true
+              boolean: true
 
             # argument to installer in chef-full, via bootstrap_context
             option :prerelease,
@@ -308,26 +307,22 @@ class Chef
 
               option :winrm_no_verify_cert,
                 long: "--winrm-no-verify-cert",
-                description: "Do not verify the SSL certificate of the target node for WinRM. Defaults to true.",
-                default: false
+                description: "Do not verify the SSL certificate of the target node for WinRM."
 
 
               option :winrm_ssl,
                 long: "--winrm-ssl",
-                description: "Connect to WinRM using SSL",
-                boolean: true
+                description: "Connect to WinRM using SSL"
 
               option :winrm_auth_method,
                 :short => "-w AUTH-METHOD",
                 :long => "--winrm-auth-method AUTH-METHOD",
                 :description => "The WinRM authentication method to use. Valid choices are #{WINRM_AUTH_PROTOCOL_LIST}",
-                :default => "negotiate",
                 :proc => Proc.new { |protocol| Chef::Config[:knife][:winrm_auth_method] = protocol }
 
               option :winrm_basic_auth_only,
                 long: "--winrm-basic-auth-only",
                 description: "For WinRM basic authentication when using the 'ssl' auth method",
-                default: false,
                 boolean: true
 
               # This option was provided in knife bootstrap windows winrm,
@@ -353,7 +348,6 @@ class Chef
               option :winrm_session_timeout,
                 :long => "--winrm-session-timeout SECONDS",
                 :description => "The number of seconds to wait for each WinRM operation to be acknowledged while running bootstrap",
-                :default => 30,
                 :proc => Proc.new { |protocol| Chef::Config[:knife][:winrm_session_timeout] = protocol }
 
           end
