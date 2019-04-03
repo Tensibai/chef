@@ -732,33 +732,215 @@ describe Chef::Knife::Bootstrap do
   end
 
 
+
   context "#connection_opts" do
-    before :each do
-      # TODO UNTESTED:
-      # Chef::Config[:knife][:max_wait_seconds_until_ready] = 100
+    let(:connection_protocol) { "ssh" }
+    before do
+      allow(knife).to receive(:connection_protocol).and_return connection_protocol
+    end
+    context "behavioral test: " do
+      let(:expected_connection_opts) {
+        { base_opts: true,
+          ssh_identity_opts: true,
+          ssh_opts: true,
+          gateway_opts: true,
+          host_verify_opts: true,
+          sudo_opts: true,
+          winrm_opts: true }
+      }
+
+      it "queries and merges only expected configurations" do
+        expect(knife).to receive(:base_opts).and_return({ base_opts: true })
+        expect(knife).to receive(:host_verify_opts).and_return({ host_verify_opts: true })
+        expect(knife).to receive(:gateway_opts).and_return({ gateway_opts: true })
+        expect(knife).to receive(:sudo_opts).and_return({ sudo_opts: true })
+        expect(knife).to receive(:winrm_opts).and_return({ winrm_opts: true })
+        expect(knife).to receive(:ssh_opts).and_return({ ssh_opts: true })
+        expect(knife).to receive(:ssh_identity_opts).and_return({ ssh_identity_opts: true })
+        expect(knife.connection_opts).to match expected_connection_opts
+      end
     end
 
-    let(:expected_connection_opts) {
-      { base_opts: true,
-        ssh_identity_opts: true,
-        ssh_opts: true,
-        gateway_opts: true,
-        host_verify_opts: true,
-        sudo_opts: true,
-        winrm_opts: true }
-    }
+    context "functional test: " do
+      context "when protocol is winrm" do
+        let(:connection_protocol) { "winrm" }
 
-    it "merges expected configurations" do
-      expect(knife).to receive(:base_opts).and_return({ base_opts: true })
-      expect(knife).to receive(:host_verify_opts).and_return({ host_verify_opts: true })
-      expect(knife).to receive(:gateway_opts).and_return({ gateway_opts: true })
-      expect(knife).to receive(:sudo_opts).and_return({ sudo_opts: true })
-      expect(knife).to receive(:winrm_opts).and_return({ winrm_opts: true })
-      expect(knife).to receive(:ssh_opts).and_return({ ssh_opts: true })
-      expect(knife).to receive(:ssh_identity_opts).and_return({ ssh_identity_opts: true })
-      expect(knife.connection_opts).to match expected_connection_opts
-    end
-  end
+            # Since we're testing that knife values are consulted when
+          # CLI opts do not have an entry, we'll not use our 'connection_protocol' block.
+        # context "and neither CLI nor Chef::Config config entries have been provided"
+        # end
+        # TEST: password options are NOT ever pulled from knife config
+        context "and all supported values are sourced from Chef::Config entries" do
+          before do
+            # Set everything to easily identifiable and obviously fake values
+            # to verify that Chef::Config is being sourced instead of knife.config
+            Chef::Config[:knife][:max_wait] = 9999
+            Chef::Config[:knife][:winrm_user] = "winbob"
+            Chef::Config[:knife][:winrm_port] = 9999
+            Chef::Config[:knife][:ca_trust_file] = "trust.me"
+            Chef::Config[:knife][:kerberos_realm] = "realm"
+            Chef::Config[:knife][:kerberos_service] = "service"
+            Chef::Config[:knife][:winrm_auth_method] = "kerberos" # default is negotiate
+            Chef::Config[:knife][:winrm_basic_auth_only] = true
+            Chef::Config[:knife][:winrm_no_verify_cert] = true
+            Chef::Config[:knife][:winrm_session_timeout] = 9999
+            Chef::Config[:knife][:winrm_ssl] = true
+            Chef::Config[:knife][:winrm_ssl_peer_fingerprint] = "ABCDEF"
+          end
+
+          context "and unsupported Chef::Config options are given in Chef::Config, not in CLI" do
+            before do
+              Chef::Config[:knife][:password] = "blah"
+              Chef::Config[:knife][:winrm_password] = "blah"
+            end
+            it "does not include the corresponding option in the connection options" do
+              expect(knife.connection_opts.key?(:password)).to eq false
+            end
+          end
+
+          context "and no CLI options have been given" do
+            before do
+              knife.config = {}
+            end
+            let(:expected_result) {
+              {
+                logger: Chef::Log, # not configurable
+                ca_trust_file: "trust.me",
+                max_wait_until_ready: 9999,
+                operation_timeout: 9999,
+                ssl_peer_fingerprint: "ABCDEF",
+                winrm_transport: "kerberos",
+                winrm_basic_auth_only: true,
+                user: "winbob",
+                port: 9999,
+                self_signed: true,
+                ssl: true,
+                kerberos_realm: "realm",
+                kerberos_service: "service"
+              }
+            }
+
+            it "generates a config hash using the Chef::Config values" do
+              expect(knife.connection_opts).to match expected_result
+            end
+
+          end
+
+          context "and some CLI options have been given" do
+            let(:expected_result) {
+              {
+                logger: Chef::Log, # not configurable
+                ca_trust_file: "no trust",
+                max_wait_until_ready: 9999,
+                operation_timeout: 9999,
+                ssl_peer_fingerprint: "ABCDEF",
+                winrm_transport: "kerberos",
+                winrm_basic_auth_only: true,
+                user: "microsoftbob",
+                port: 12,
+                self_signed: true,
+                ssl: true,
+                kerberos_realm: "realm",
+                kerberos_service: "service",
+                password: "lobster"
+              }
+            }
+
+            before do
+              knife.config[:ca_trust_file] = "no trust"
+              knife.config[:connection_user] = "microsoftbob"
+              knife.config[:connection_port] = 12
+              knife.config[:winrm_port] = "13" # indirectly verify we're not looking for the wrong CLI flag
+              knife.config[:password] = "lobster"
+            end
+
+            it "generates a config hash using the CLI options when available and falling back to Chef::Config values" do
+              expect(knife.connection_opts).to match expected_result
+            end
+          end
+
+          context "and all CLI options have been given" do
+            before do
+              # We'll force kerberos vi knife.config because it
+              # causes additional options to populate - so let's
+              # set Chef::Config to a different one so we can be sure that we didn't
+              # pull in the Chef::Config value
+              Chef::Config[:knife][:winrm_auth_method] = "negotatiate"
+              knife.config[:password] = "blue"
+              knife.config[:max_wait] = 1000
+              knife.config[:connection_user] = "clippy"
+              knife.config[:connection_port] = 1000
+              knife.config[:winrm_port] = 1001 # We should not see this value get used
+
+              knife.config[:ca_trust_file] = "trust.the.internet"
+              knife.config[:kerberos_realm] = "otherrealm"
+              knife.config[:kerberos_service] = "otherservice"
+              knife.config[:winrm_auth_method] = "kerberos" # default is negotiate
+              knife.config[:winrm_basic_auth_only] = false
+              knife.config[:winrm_no_verify_cert] = false
+              knife.config[:winrm_session_timeout] = 1000
+              knife.config[:winrm_ssl] = false
+              knife.config[:winrm_ssl_peer_fingerprint] = "FEDCBA"
+            end
+            let(:expected_result) {
+              {
+                logger: Chef::Log, # not configurable
+                ca_trust_file: "trust.the.internet",
+                max_wait_until_ready: 1000,
+                operation_timeout: 1000,
+                ssl_peer_fingerprint: "FEDCBA",
+                winrm_transport: "kerberos",
+                winrm_basic_auth_only: false,
+                user: "clippy",
+                port: 1000,
+                self_signed: false,
+                ssl: false,
+                kerberos_realm: "otherrealm",
+                kerberos_service: "otherservice",
+                password: "blue"
+              }
+            }
+            it "generates a config hash using the CLI options and pulling nothing from Chef::Config" do
+              expect(knife.connection_opts).to match expected_result
+            end
+          end
+
+
+        # end
+
+        # context "and none are populated via CLI config" do
+        #   it "populates config hash from Chef::Config values" do
+        #     expect(knife.connection_opts).to match({bob: true})
+        #
+        #   end
+        # end
+        #
+        # context "and all are also provided by mixlib-cli config" do
+        #   it "populates mixlib-cli config values" do
+        #   end
+        #
+        # end
+        # context "and some are provided by mixlib-cli config" do
+        #   it "populates mixlib-cli config values when they are present and falls back to Chef::Config" do
+        #   end
+        # end
+        end
+
+            # :max_wait
+            # :port
+            # :user
+            #
+            # :ssh_verify_host_key
+            # :ssh_forward_agent
+            # :ssh_gateway_identity
+            # :ssh_gateway
+            # :ssh_identity_file
+            # :sudo
+            # :sudo_preserve_home
+            # :use_sudo_password
+      end #winrm
+    end #behavioral test
+  end #connection_opts
 
   context "#base_opts" do
     let(:connection_protocol) { nil }
@@ -1092,7 +1274,7 @@ describe Chef::Knife::Bootstrap do
         winrm_basic_auth_only: false,
         ssl: false,
         ssl_peer_fingerprint: nil,
-        operation_timeout: 30,
+        operation_timeout: 60,
       }}
 
       it "generates a correct configuration hash with expected defaults" do
@@ -1372,9 +1554,12 @@ describe Chef::Knife::Bootstrap do
         end
 
         it "warns, prompts for password, then reconnects with a password-enabled configuration using the new password" do
+          question_mock = double("question")
           expect(knife).to receive(:do_connect).and_raise(expected_error)
           expect(knife.ui).to receive(:warn).with(/Failed to auth.*/)
-          expect(knife.ui).to receive(:ask).and_return("newpassword")
+          expect(knife.ui).to receive(:ask).and_yield(question_mock).and_return("newpassword")
+          # Ensure that we set echo off to prevent showing password on the screen
+          expect(question_mock).to receive(:echo=).with false
           expect(knife).to receive(:do_connect) do |opts|
              expect(opts[:password]).to eq "newpassword"
           end
@@ -1410,6 +1595,7 @@ describe Chef::Knife::Bootstrap do
     end
   end
 
+
   describe "#config_value" do
     before do
       knife.config[:test_key_a] = "a from cli"
@@ -1431,7 +1617,7 @@ describe Chef::Knife::Bootstrap do
       expect(knife.config_value(:test_key_c)).to eq "c from Chef::Config"
     end
 
-    it "returns the Chef::Config value from the alternate key when the CLI key is not set" do
+    it "returns the Chef::Config value from the alternative key when the CLI key is not set" do
       expect(knife.config_value(:test_key_c, :alt_test_key_c)).to eq "alt c from Chef::Config"
     end
 
@@ -1497,6 +1683,23 @@ describe Chef::Knife::Bootstrap do
         expect(knife.default_bootstrap_template).to eq "chef-full"
       end
     end
+  end
+
+  describe "#do_connect" do
+    let(:host_descriptor) { "example.com" }
+    let(:target_host) { double("TargetHost") }
+    let(:resolver_mock) { double("TargetResolver", targets: [ target_host ]) }
+    before do
+      allow(knife).to receive(:host_descriptor).and_return host_descriptor
+    end
+
+    it "resolves the target and connects it" do
+      expect(ChefCore::TargetResolver).to receive(:new).and_return resolver_mock
+      expect(target_host).to receive(:connect!)
+      knife.do_connect({})
+    end
+  end
+  describe "#validate_winrm_transport_opts!" do
   end
 end
 

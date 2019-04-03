@@ -266,8 +266,8 @@ class Chef
         resolver = ChefCore::TargetResolver.new(host_descriptor, connection_protocol,
                                                 conn_options, max_expanded_targets: 1)
         @target_host = resolver.targets.first
-        @target_host.connect!
-        @target_host
+        target_host.connect!
+        target_host
       end
 
       # Fail if both first_boot_attributes and first_boot_attributes_from_file
@@ -488,7 +488,7 @@ class Chef
         auth_method = config_value(:winrm_auth_method, :winrm_auth_method, "negotiate")
         opts = {
           winrm_transport: auth_method, # winrm gem and train calls auth method 'transport'
-          winrm_basic_auth_only: config_value(:winrm_basic_auth_only),
+          winrm_basic_auth_only: config_value(:winrm_basic_auth_only) || false,
           ssl: config_value(:winrm_ssl) === true,
           ssl_peer_fingerprint: config_value(:winrm_ssl_peer_fingerprint)
         }
@@ -502,7 +502,7 @@ class Chef
           opts[:ca_trust_file] = config_value(:ca_trust_file)
         end
 
-        opts[:operation_timeout] = config_value(:winrm_session_timeout)
+        opts[:operation_timeout] = config_value(:winrm_session_timeout) || 60
 
         opts
       end
